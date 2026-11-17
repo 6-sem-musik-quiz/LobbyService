@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\LobbyService.Domain\LobbyService.Domain.csproj" />
+    <ProjectReference Include="..\LobbyService.Repository\LobbyService.Repository.csproj" />
+  </ItemGroup>
+</Project>
