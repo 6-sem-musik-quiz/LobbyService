@@ -6,11 +6,9 @@ This .NET 10 repository is part of the `6-sem-musik-quiz` exam project. Read `RE
 
 - `src/LobbyService.Api`: HTTP controllers, middleware, startup.
 - `src/LobbyService.Service`: business logic and interfaces.
-- `src/LobbyService.Repository`: EF Core/PostgreSQL, data configurations, persistence.
+- `src/LobbyService.Repository`: data access. LobbyService has no SQL database in the C4 design.
 - `src/LobbyService.Domain`: entities and DTOs.
 - Tests: `tests/LobbyService.Service.Tests` and `tests/LobbyService.Api.Tests`.
-
-`Example*` classes are scaffolding and should be replaced when implementing actual features; do not treat them as the domain model.
 
 ## Build and tests
 
@@ -20,7 +18,7 @@ dotnet build -c Release
 dotnet test -c Release
 ```
 
-Run locally: `docker compose up db` then `dotnet run --project src/LobbyService.Api`. Review the README before migrations, DB access or changing ports.
+Run locally: `dotnet run --project src/LobbyService.Api`. Review the README before changing ports.
 
 ## Four-agent workflow
 

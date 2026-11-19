@@ -1,19 +1,13 @@
-using LobbyService.Repository.Data;
-using LobbyService.Repository.Interfaces;
-using LobbyService.Repository.Repositories;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LobbyService.Repository.Extensions;
 
 public static class RepositoryLayerExtensions
 {
-    public static IServiceCollection AddRepositoryLayer(this IServiceCollection services, string connectionString)
+    // LobbyService has no SQL database in the C4 design (only UserDB, StatsDB and MusicDB do).
+    // Active lobbies go in Redis (LobbyCacheRepository) when that is built.
+    public static IServiceCollection AddRepositoryLayer(this IServiceCollection services)
     {
-        services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
-
-        services.AddScoped<IExampleRepository, ExampleRepository>();
-
         return services;
     }
 }
