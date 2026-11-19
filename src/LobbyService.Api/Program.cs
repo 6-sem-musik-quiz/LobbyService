@@ -11,9 +11,7 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddHealthChecks();
 
-builder.Services.AddRepositoryLayer(
-    builder.Configuration.GetConnectionString("Default")
-    ?? throw new InvalidOperationException("Connection string 'Default' is not configured."));
+builder.Services.AddRepositoryLayer();
 builder.Services.AddServiceLayer();
 
 var app = builder.Build();
