@@ -47,6 +47,7 @@ dotnet run --project src/LobbyService.Api
 - API: http://localhost:5004
 - Swagger: http://localhost:5004/swagger
 - Health: http://localhost:5004/health
+- Ready (also checks Postgres): http://localhost:5004/health/ready
 - Postgres: `localhost:5444` (postgres / postgres)
 
 ## Database migrations
