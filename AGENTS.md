@@ -19,6 +19,7 @@ dotnet test -c Release
 ```
 
 Run locally: `dotnet run --project src/LobbyService.Api`. Review the README before changing ports.
+The JWT signing key lives in OpenBao (`kv/quiz/jwt`); locally it comes from `.env`, which must never be committed.
 
 ## Four-agent workflow
 
