@@ -42,7 +42,7 @@ Waiting lobbies expire after 2 hours without changes. Every write renews the TTL
 | Key | Default | Description |
 |---|---|---|
 | `ConnectionStrings:Redis` | `localhost:6379` | Redis connection string |
-| `MusicService:BaseUrl` | `http://localhost:5002` | MusicService base URL (used for `GET /api/playlists/{id}`) |
+| `MusicService:BaseUrl` | `http://localhost:5002` | MusicService base URL (used for `GET /api/playlists/{id}`, which returns `{ id, name, songCount }` per SCRUM-92) |
 | `Jwt:SigningKey` | *(empty)* | Same symmetric key as UserService. Set it via user secrets or an environment variable (`Jwt__SigningKey`), never in `appsettings.json`. Without it every token is rejected. |
 | `Jwt:Issuer` | `slopster-userservice` | Expected token issuer |
 | `Jwt:Audience` | `slopster` | Expected token audience |

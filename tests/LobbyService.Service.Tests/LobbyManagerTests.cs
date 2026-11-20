@@ -24,7 +24,7 @@ public class LobbyManagerTests
         _repository.GetLobbyIdForUserAsync(Arg.Any<int>()).Returns((Guid?)null);
         _repository.TryCreateAsync(Arg.Any<Lobby>()).Returns(CreateLobbyResult.Created);
         _musicService.GetPlaylistAsync(Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new PlaylistDto("90'er hits", SongCount: 50));
+            .Returns(new PlaylistDto(1, "90'er hits", 50));
         _codeGenerator.Generate().Returns("ABC234");
 
         _sut = new LobbyManager(_repository, _musicService, _codeGenerator, TimeProvider.System);
@@ -111,7 +111,7 @@ public class LobbyManagerTests
     {
         // 10 rounds need 11 songs (start card + one per round).
         _musicService.GetPlaylistAsync(Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new PlaylistDto("Kort liste", SongCount: 10));
+            .Returns(new PlaylistDto(1, "Kort liste", 10));
 
         var ex = await Assert.ThrowsAsync<LobbyValidationException>(() => _sut.CreateAsync(ValidRequest(), UserId, UserName, Token));
         Assert.Contains("10 songs", ex.Message);
@@ -123,7 +123,7 @@ public class LobbyManagerTests
     public async Task CreateAsync_ExactlyRoundsPlusOneSongs_IsAccepted()
     {
         _musicService.GetPlaylistAsync(Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new PlaylistDto("Lige nok", Songs: Enumerable.Range(0, 11).Select(i => (object)i).ToList()));
+            .Returns(new PlaylistDto(1, "Lige nok", 11));
 
         var result = await _sut.CreateAsync(ValidRequest(), UserId, UserName, Token);
 
