@@ -1,10 +1,12 @@
 using System.Text;
 using System.Text.Json.Serialization;
+using LobbyService.Api.HealthChecks;
 using LobbyService.Api.Middleware;
 using LobbyService.Repository.Extensions;
 using LobbyService.Service.Extensions;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,7 +17,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
-builder.Services.AddHealthChecks();
+// /health is liveness (the process is up); /health/ready also checks
+// that Redis answers, so a pod without Redis gets no traffic.
+builder.Services.AddHealthChecks()
+    .AddCheck<RedisHealthCheck>("redis", tags: ["ready"]);
 
 // JWT issued by UserService (same validation as SCRUM-88). User id from "sub", name from "unique_name".
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
@@ -61,7 +66,8 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-app.MapHealthChecks("/health").AllowAnonymous();
+app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }).AllowAnonymous();
 
 app.Run();
 

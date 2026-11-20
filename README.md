@@ -63,7 +63,7 @@ dotnet run --project src/LobbyService.Api
 
 - API: http://localhost:5004
 - Swagger: http://localhost:5004/swagger
-- Health: http://localhost:5004/health
+- Health: http://localhost:5004/health (liveness), http://localhost:5004/health/ready (also checks Redis)
 
 ## Tests
 
