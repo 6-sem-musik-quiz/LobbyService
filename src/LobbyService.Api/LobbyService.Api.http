@@ -1,3 +1,19 @@
 @baseUrl = http://localhost:5004
+# JWT from UserService login
+@token = paste-a-token-here
 
 GET {{baseUrl}}/health
+
+###
+
+POST {{baseUrl}}/api/lobbies
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "categoryId": 1,
+  "answerTimeSeconds": 30,
+  "rounds": 10,
+  "maxPlayers": 6,
+  "isPrivate": true
+}
