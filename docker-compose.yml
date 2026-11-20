@@ -1,3 +1,5 @@
+# The JWT signing key comes from a local .env (gitignored); compose stops with an
+# error if it is missing. Copy .env.example to .env and see README, "Running locally".
 services:
   api:
     build: .
@@ -5,3 +7,4 @@ services:
       - "5004:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
+      Jwt__SigningKey: "${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is not set. Copy .env.example to .env and fill it in from OpenBao (see README)}"

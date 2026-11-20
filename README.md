@@ -43,11 +43,19 @@ Waiting lobbies expire after 2 hours without changes. Every write renews the TTL
 |---|---|---|
 | `ConnectionStrings:Redis` | `localhost:6379` | Redis connection string |
 | `MusicService:BaseUrl` | `http://localhost:5002` | MusicService base URL (used for `GET /api/playlists/{id}`, which returns `{ id, name, songCount }` per SCRUM-92) |
-| `Jwt:SigningKey` | *(empty)* | Same symmetric key as UserService. Set it via user secrets or an environment variable (`Jwt__SigningKey`), never in `appsettings.json`. Without it every token is rejected. |
+| `Jwt:SigningKey` | *(empty)* | Same symmetric key as UserService. It lives in OpenBao at `kv/quiz/jwt` (property `signing-key`); in the cluster it arrives as `Jwt__SigningKey` via ExternalSecret. Locally, put it in `.env` (see below), never in `appsettings.json`. Without it every token is rejected. |
 | `Jwt:Issuer` | `slopster-userservice` | Expected token issuer |
 | `Jwt:Audience` | `slopster` | Expected token audience |
 
 ## Running locally
+
+The JWT signing key is a secret, so each developer keeps it in a local `.env` file
+(in `.gitignore`). Compose refuses to start without it.
+
+```powershell
+Copy-Item .env.example .env
+# fill in JWT_SIGNING_KEY: bao kv get -field=signing-key kv/quiz/jwt
+```
 
 **Everything in Docker:**
 
@@ -55,9 +63,10 @@ Waiting lobbies expire after 2 hours without changes. Every write renews the TTL
 docker compose up --build
 ```
 
-**API from your IDE:**
+**API from your IDE:** set the key as an environment variable first.
 
-```bash
+```powershell
+$env:Jwt__SigningKey = "<key>"
 dotnet run --project src/LobbyService.Api
 ```
 
