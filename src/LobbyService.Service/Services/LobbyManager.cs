@@ -32,9 +32,9 @@ public class LobbyManager(
 
         // One start card plus one song per round.
         var requiredSongs = request.Rounds + 1;
-        if (playlist.TotalSongs < requiredSongs)
+        if (playlist.SongCount < requiredSongs)
             throw new LobbyValidationException(
-                $"The playlist has {playlist.TotalSongs} songs, but {request.Rounds} rounds need at least {requiredSongs}.");
+                $"The playlist has {playlist.SongCount} songs, but {request.Rounds} rounds need at least {requiredSongs}.");
 
         var lobby = new Lobby
         {

@@ -52,7 +52,7 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     private class FakeMusicServiceClient : IMusicServiceClient
     {
         public Task<PlaylistDto?> GetPlaylistAsync(int playlistId, string accessToken, CancellationToken cancellationToken = default) =>
-            Task.FromResult(playlistId == KnownPlaylistId ? new PlaylistDto("Test playlist", SongCount: 30) : null);
+            Task.FromResult(playlistId == KnownPlaylistId ? new PlaylistDto(KnownPlaylistId, "Test playlist", 30) : null);
     }
 
     private class InMemoryLobbyCacheRepository : ILobbyCacheRepository
