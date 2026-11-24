@@ -43,6 +43,14 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
         return Guid.TryParse(value.ToString(), out var id) ? id : null;
     }
 
+    public async Task ClearUserLobbyAsync(int userId, Guid lobbyId)
+    {
+        var tran = Db.CreateTransaction();
+        tran.AddCondition(Condition.StringEqual(UserLobbyKey(userId), lobbyId.ToString()));
+        _ = tran.KeyDeleteAsync(UserLobbyKey(userId));
+        await tran.ExecuteAsync(); // false = the key changed in between; then there is nothing to clean
+    }
+
     public async Task<CreateLobbyResult> TryCreateAsync(Lobby lobby)
     {
         var id = lobby.Id.ToString();

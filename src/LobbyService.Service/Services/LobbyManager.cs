@@ -32,7 +32,7 @@ public class LobbyManager(
     {
         Validate(request);
 
-        if (await repository.GetLobbyIdForUserAsync(userId) is not null)
+        if (await GetCurrentLobbyAsync(userId) is not null)
             throw new LobbyConflictException("You are already in a lobby.");
 
         var playlist = await musicService.GetPlaylistAsync(request.CategoryId, accessToken, cancellationToken)
@@ -80,6 +80,26 @@ public class LobbyManager(
         }
 
         throw new InvalidOperationException($"Could not generate a unique lobby code after {MaxCodeAttempts} attempts.");
+    }
+
+    public async Task<LobbyDto?> GetMyLobbyAsync(int userId) =>
+        await GetCurrentLobbyAsync(userId) is { } lobby ? LobbyDto.FromEntity(lobby) : null;
+
+    // The user-lobby key is only trusted when its lobby still exists, is waiting and lists the user.
+    // Anything else is a stale key (e.g. left over from an older version, or Redis lost the lobby)
+    // and is deleted, so the user is not locked out of creating and joining lobbies.
+    private async Task<Lobby?> GetCurrentLobbyAsync(int userId)
+    {
+        if (await repository.GetLobbyIdForUserAsync(userId) is not { } lobbyId)
+            return null;
+
+        var lobby = await repository.GetAsync(lobbyId);
+        if (lobby is not null && lobby.Status == LobbyStatus.Waiting && lobby.Players.Any(p => p.UserId == userId))
+            return lobby;
+
+        logger.LogInformation("Clearing stale user-lobby key for user {UserId} (lobby {LobbyId}).", userId, lobbyId);
+        await repository.ClearUserLobbyAsync(userId, lobbyId);
+        return null;
     }
 
     public async Task<IReadOnlyList<LobbySummaryDto>> GetOpenLobbiesAsync()
@@ -263,7 +283,7 @@ public class LobbyManager(
                 throw new LobbyConflictException("The game has already started.");
             if (lobby.Players.Count >= lobby.Settings.MaxPlayers)
                 throw new LobbyConflictException("The lobby is full.");
-            if (await repository.GetLobbyIdForUserAsync(userId) is not null)
+            if (await GetCurrentLobbyAsync(userId) is not null)
                 throw new LobbyConflictException("You are already in another lobby.");
 
             var after = Clone(lobby);
