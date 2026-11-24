@@ -50,7 +50,9 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("Redis"));
-builder.Services.AddServiceLayer(builder.Configuration["MusicService:BaseUrl"]);
+builder.Services.AddServiceLayer(
+    builder.Configuration["MusicService:BaseUrl"],
+    builder.Configuration["Services:GameService"]); // env Services__GameService
 
 var app = builder.Build();
 

@@ -372,6 +372,154 @@ public class LobbyControllerTests(LobbyApiFactory factory) : IClassFixture<Lobby
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // ---- Ready / start ----
+
+    // Creates a lobby with the host and the given guests, optionally marking everyone ready.
+    private async Task<string> LobbyWith(HttpClient host, HttpClient[] guests, bool allReady, bool isPrivate = false)
+    {
+        var id = (await CreateLobby(host, isPrivate: isPrivate)).GetProperty("id").GetString()!;
+        foreach (var guest in guests)
+        {
+            var join = isPrivate
+                ? await guest.PostAsJsonAsync("/api/lobbies/join-by-code",
+                    new { code = (await (await host.GetAsync($"/api/lobbies/{id}")).Content.ReadFromJsonAsync<JsonElement>())
+                        .GetProperty("code").GetString() })
+                : await guest.PostAsync($"/api/lobbies/{id}/join", null);
+            Assert.Equal(HttpStatusCode.OK, join.StatusCode);
+        }
+
+        if (allReady)
+            foreach (var client in guests.Prepend(host))
+                Assert.Equal(HttpStatusCode.OK,
+                    (await client.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = true })).StatusCode);
+        return id;
+    }
+
+    [Fact]
+    public async Task Ready_TogglesFlag_Returns200WithLobby()
+    {
+        var host = ClientFor(1501);
+        var guest = ClientFor(1502, "guest");
+        var id = await LobbyWith(host, [guest], allReady: false);
+
+        var ready = await guest.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = true });
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        var players = (await ready.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("players").EnumerateArray().ToList();
+        Assert.False(players[0].GetProperty("isReady").GetBoolean());
+        Assert.True(players[1].GetProperty("isReady").GetBoolean());
+
+        var notReady = await guest.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = false });
+        var after = await notReady.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(after.GetProperty("players")[1].GetProperty("isReady").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Ready_NotInLobby_Returns404()
+    {
+        var id = await LobbyWith(ClientFor(1511), [], allReady: false);
+
+        var response = await ClientFor(1512).PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = true });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_AllReady_Returns200WithGameIdAndFreesPlayers()
+    {
+        var host = ClientFor(1521, "host");
+        var guest = ClientFor(1522, "guest");
+        var id = await LobbyWith(host, [guest], allReady: true);
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var gameId = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("gameId").GetGuid();
+        Assert.NotEqual(Guid.Empty, gameId);
+
+        var lobby = await (await guest.GetAsync($"/api/lobbies/{id}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("InGame", lobby.GetProperty("status").GetString());
+        var open = await (await guest.GetAsync("/api/lobbies")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.DoesNotContain(open.EnumerateArray(), l => l.GetProperty("id").GetString() == id);
+
+        // Both players can create new lobbies after the start.
+        await CreateLobby(host);
+        await CreateLobby(guest);
+    }
+
+    [Fact]
+    public async Task Start_NotHost_Returns403()
+    {
+        var host = ClientFor(1531);
+        var guest = ClientFor(1532);
+        var id = await LobbyWith(host, [guest], allReady: true);
+
+        var response = await guest.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_TooFewPlayers_Returns409()
+    {
+        var host = ClientFor(1541);
+        var id = await LobbyWith(host, [], allReady: true);
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_NotAllReady_Returns409()
+    {
+        var host = ClientFor(1551);
+        var id = await LobbyWith(host, [ClientFor(1552)], allReady: false);
+        await host.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = true });
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_Twice_Returns409AndReadyAfterStartReturns409()
+    {
+        var host = ClientFor(1561);
+        var id = await LobbyWith(host, [ClientFor(1562)], allReady: true, isPrivate: true);
+        Assert.Equal(HttpStatusCode.OK, (await host.PostAsync($"/api/lobbies/{id}/start", null)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Conflict, (await host.PostAsync($"/api/lobbies/{id}/start", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,
+            (await host.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = false })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_GameServiceFails_Returns502AndLobbyStaysWaiting()
+    {
+        var host = ClientFor(1571);
+        var guest = ClientFor(LobbyApiFactory.GameServiceFailsForUserId);
+        var id = await LobbyWith(host, [guest], allReady: true);
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<ProblemDetails>();
+        Assert.Equal(502, problem!.Status);
+        var lobby = await (await host.GetAsync($"/api/lobbies/{id}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Waiting", lobby.GetProperty("status").GetString());
+
+        // Players are still in the lobby, so they cannot create another one.
+        Assert.Equal(HttpStatusCode.Conflict, (await host.PostAsJsonAsync("/api/lobbies", Body())).StatusCode);
+    }
+
+    [Fact]
+    public async Task Start_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().PostAsync($"/api/lobbies/{Guid.NewGuid()}/start", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     [Fact]
     public async Task Health_IsAnonymous()
     {

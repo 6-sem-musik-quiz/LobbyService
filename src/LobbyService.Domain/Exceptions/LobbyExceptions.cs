@@ -19,6 +19,13 @@ public class LobbyNotFoundException(Guid lobbyId) : Exception($"Lobby {lobbyId} 
     public Guid LobbyId { get; } = lobbyId;
 }
 
+// The user is in the lobby but may not do this, e.g. start the game without being host. Mapped to 403.
+public class LobbyForbiddenException(string message) : Exception(message);
+
+// GameService could not be reached or did not create the game. Mapped to 502.
+public class GameServiceUnavailableException(string message, Exception? innerException = null)
+    : Exception(message, innerException);
+
 // No lobby has the given join code. Mapped to 404.
 public class LobbyCodeNotFoundException(string code) : Exception($"No lobby has the code '{code}'.")
 {

@@ -20,12 +20,8 @@ public class LobbyController(ILobbyManager lobbyManager) : ControllerBase
             return Unauthorized();
 
         var userName = User.FindFirst("unique_name")?.Value ?? string.Empty;
-        var authorization = Request.Headers.Authorization.ToString();
-        var accessToken = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
-            ? authorization["Bearer ".Length..].Trim()
-            : string.Empty;
 
-        var lobby = await lobbyManager.CreateAsync(request, userId, userName, accessToken, cancellationToken);
+        var lobby = await lobbyManager.CreateAsync(request, userId, userName, GetAccessToken(), cancellationToken);
         return Created($"/api/lobbies/{lobby.Id}", lobby);
     }
 
@@ -92,9 +88,49 @@ public class LobbyController(ILobbyManager lobbyManager) : ControllerBase
         return NoContent();
     }
 
+    // Marks the caller ready or not ready.
+    [HttpPost("{id:guid}/ready")]
+    [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<LobbyDto>> Ready(Guid id, ReadyRequest request)
+    {
+        if (!TryGetUser(out var userId, out _))
+            return Unauthorized();
+
+        return Ok(await lobbyManager.SetReadyAsync(id, userId, request.Ready));
+    }
+
+    // The host starts the game once at least 2 players are in the lobby and all are ready.
+    // GameService is called with the host's token; if it fails the response is 502 and the lobby stays Waiting.
+    [HttpPost("{id:guid}/start")]
+    [ProducesResponseType<StartGameResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status502BadGateway)]
+    public async Task<ActionResult<StartGameResponse>> Start(Guid id, CancellationToken cancellationToken)
+    {
+        if (!TryGetUser(out var userId, out _))
+            return Unauthorized();
+
+        return Ok(await lobbyManager.StartAsync(id, userId, GetAccessToken(), cancellationToken));
+    }
+
     private bool TryGetUser(out int userId, out string userName)
     {
         userName = User.FindFirst("unique_name")?.Value ?? string.Empty;
         return int.TryParse(User.FindFirst("sub")?.Value, out userId);
+    }
+
+    // The caller's own JWT, forwarded to MusicService and GameService.
+    private string GetAccessToken()
+    {
+        var authorization = Request.Headers.Authorization.ToString();
+        return authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authorization["Bearer ".Length..].Trim()
+            : string.Empty;
     }
 }

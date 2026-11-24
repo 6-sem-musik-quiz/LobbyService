@@ -17,6 +17,7 @@ public class LobbyManagerTests
     private readonly ILobbyCacheRepository _repository = Substitute.For<ILobbyCacheRepository>();
     private readonly IMusicServiceClient _musicService = Substitute.For<IMusicServiceClient>();
     private readonly ILobbyCodeGenerator _codeGenerator = Substitute.For<ILobbyCodeGenerator>();
+    private readonly IGameServiceClient _gameService = Substitute.For<IGameServiceClient>();
     private readonly LobbyManager _sut;
 
     public LobbyManagerTests()
@@ -27,7 +28,7 @@ public class LobbyManagerTests
             .Returns(new PlaylistDto(1, "90'er hits", 50));
         _codeGenerator.Generate().Returns("ABC234");
 
-        _sut = new LobbyManager(_repository, _musicService, _codeGenerator, TimeProvider.System);
+        _sut = new LobbyManager(_repository, _musicService, _gameService, _codeGenerator, TimeProvider.System);
     }
 
     private static CreateLobbyRequest ValidRequest(bool isPrivate = false) =>
@@ -580,6 +581,224 @@ public class LobbyManagerTests
 
         await _repository.Received(1).TryLeaveAsync(fresh,
             Arg.Is<Lobby?>(a => a!.HostUserId == 8 && a.Players.Count == 2), UserId);
+    }
+
+    // ---- Ready ----
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SetReadyAsync_ChangesOnlyCallersFlag(bool ready)
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        lobby.Players[1].IsReady = !ready;
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryUpdateAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Updated);
+
+        var result = await _sut.SetReadyAsync(lobby.Id, UserId, ready);
+
+        Assert.Equal(ready, result.Players[1].IsReady);
+        Assert.False(result.Players[0].IsReady);
+        await _repository.Received(1).TryUpdateAsync(lobby,
+            Arg.Is<Lobby>(a => a.Players[1].IsReady == ready && !a.Players[0].IsReady));
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_AlreadyInRequestedState_DoesNotWrite()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        lobby.Players[1].IsReady = true;
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var result = await _sut.SetReadyAsync(lobby.Id, UserId, true);
+
+        Assert.True(result.Players[1].IsReady);
+        await _repository.DidNotReceiveWithAnyArgs().TryUpdateAsync(default!, default!);
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_UserNotInLobby_ThrowsNotFound()
+    {
+        var lobby = MakeLobby(0, userIds: [7, 8]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.SetReadyAsync(lobby.Id, UserId, true));
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_UnknownLobby_ThrowsNotFound()
+    {
+        var id = Guid.NewGuid();
+        _repository.GetAsync(id).Returns((Lobby?)null);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.SetReadyAsync(id, UserId, true));
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_GameStarted_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, status: LobbyStatus.InGame, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.SetReadyAsync(lobby.Id, UserId, true));
+        await _repository.DidNotReceiveWithAnyArgs().TryUpdateAsync(default!, default!);
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_LobbyChangedConcurrently_RetriesWithFreshData()
+    {
+        var first = MakeLobby(0, userIds: [7, UserId]);
+        var fresh = MakeLobby(0, userIds: [7, UserId, 8]);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        _repository.TryUpdateAsync(first, Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Stale);
+        _repository.TryUpdateAsync(fresh, Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Updated);
+
+        var result = await _sut.SetReadyAsync(first.Id, UserId, true);
+
+        Assert.Equal(3, result.Players.Count);
+        Assert.True(result.Players[1].IsReady);
+    }
+
+    // ---- Start ----
+
+    private static readonly Guid GameId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+
+    private Lobby ReadyLobby(params int[] userIds)
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: userIds.Length > 0 ? userIds : [UserId, 7, 8]);
+        lobby.Players.ForEach(p => p.IsReady = true);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        return lobby;
+    }
+
+    private void SetupStartSucceeds()
+    {
+        _gameService.CreateGameAsync(Arg.Any<CreateGameRequest>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GameId);
+        _repository.TryStartAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Updated);
+    }
+
+    [Fact]
+    public async Task StartAsync_AllReady_CallsGameServiceAndMarksLobbyInGame()
+    {
+        var lobby = ReadyLobby();
+        SetupStartSucceeds();
+
+        var result = await _sut.StartAsync(lobby.Id, UserId, Token);
+
+        Assert.Equal(GameId, result.GameId);
+        await _gameService.Received(1).CreateGameAsync(
+            Arg.Is<CreateGameRequest>(r =>
+                r.LobbyId == lobby.Id && r.CategoryId == 3 && r.CategoryName == "Rock" && r.Rounds == 15 &&
+                r.AnswerTimeSeconds == 45 &&
+                r.Players.SequenceEqual(new[]
+                {
+                    new GamePlayerDto(UserId, $"user{UserId}"), new GamePlayerDto(7, "user7"), new GamePlayerDto(8, "user8")
+                })),
+            Token, Arg.Any<CancellationToken>());
+        await _repository.Received(1).TryStartAsync(lobby,
+            Arg.Is<Lobby>(a => a.Status == LobbyStatus.InGame && a.GameId == GameId && a.Players.Count == 3));
+    }
+
+    [Fact]
+    public async Task StartAsync_NotHost_ThrowsForbidden()
+    {
+        var lobby = ReadyLobby(7, UserId);
+
+        await Assert.ThrowsAsync<LobbyForbiddenException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        await AssertNothingStarted();
+    }
+
+    [Fact]
+    public async Task StartAsync_TooFewPlayers_ThrowsConflict()
+    {
+        var lobby = ReadyLobby(UserId);
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        Assert.Contains("2 players", ex.Message);
+        await AssertNothingStarted();
+    }
+
+    [Fact]
+    public async Task StartAsync_NotAllReady_ThrowsConflict()
+    {
+        var lobby = ReadyLobby();
+        lobby.Players[2].IsReady = false;
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        Assert.Contains("ready", ex.Message);
+        await AssertNothingStarted();
+    }
+
+    [Fact]
+    public async Task StartAsync_AlreadyStarted_ThrowsConflict()
+    {
+        var lobby = ReadyLobby();
+        lobby.Status = LobbyStatus.InGame;
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        await AssertNothingStarted();
+    }
+
+    [Fact]
+    public async Task StartAsync_UserNotInLobby_ThrowsNotFound()
+    {
+        var lobby = ReadyLobby(7, 8);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        await AssertNothingStarted();
+    }
+
+    [Fact]
+    public async Task StartAsync_GameServiceFails_ThrowsAndLeavesLobbyWaiting()
+    {
+        var lobby = ReadyLobby();
+        _gameService.CreateGameAsync(Arg.Any<CreateGameRequest>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns<Guid>(_ => throw new GameServiceUnavailableException("down"));
+
+        await Assert.ThrowsAsync<GameServiceUnavailableException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+        await _repository.DidNotReceiveWithAnyArgs().TryStartAsync(default!, default!);
+        await _repository.DidNotReceiveWithAnyArgs().TryUpdateAsync(default!, default!);
+        Assert.Equal(LobbyStatus.Waiting, lobby.Status);
+    }
+
+    [Fact]
+    public async Task StartAsync_LobbyChangedButSamePlayers_RetriesWithoutCreatingSecondGame()
+    {
+        var first = ReadyLobby();
+        var fresh = ReadyLobby();
+        fresh.Id = first.Id;
+        fresh.Settings.MaxPlayers = 5; // changed JSON, same players
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        SetupStartSucceeds();
+        _repository.TryStartAsync(first, Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Stale);
+
+        var result = await _sut.StartAsync(first.Id, UserId, Token);
+
+        Assert.Equal(GameId, result.GameId);
+        await _gameService.Received(1).CreateGameAsync(Arg.Any<CreateGameRequest>(), Token, Arg.Any<CancellationToken>());
+        await _repository.Received(1).TryStartAsync(fresh, Arg.Any<Lobby>());
+    }
+
+    [Fact]
+    public async Task StartAsync_PlayerJoinedWhileStarting_ThrowsConflict()
+    {
+        var first = ReadyLobby();
+        var fresh = ReadyLobby(UserId, 7, 8, 9);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        SetupStartSucceeds();
+        _repository.TryStartAsync(first, Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Stale);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.StartAsync(first.Id, UserId, Token));
+        await _repository.Received(1).TryStartAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>());
+    }
+
+    private async Task AssertNothingStarted()
+    {
+        await _gameService.DidNotReceiveWithAnyArgs().CreateGameAsync(default!, default!, default);
+        await _repository.DidNotReceiveWithAnyArgs().TryStartAsync(default!, default!);
     }
 }
 

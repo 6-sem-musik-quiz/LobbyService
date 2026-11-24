@@ -10,6 +10,7 @@ namespace LobbyService.Service.Services;
 public class LobbyManager(
     ILobbyCacheRepository repository,
     IMusicServiceClient musicService,
+    IGameServiceClient gameService,
     ILobbyCodeGenerator codeGenerator,
     TimeProvider timeProvider) : ILobbyManager
 {
@@ -143,6 +144,87 @@ public class LobbyManager(
 
         throw new LobbyConflictException("The lobby is busy. Please try again.");
     }
+
+    public async Task<LobbyDto> SetReadyAsync(Guid lobbyId, int userId, bool ready)
+    {
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await repository.GetAsync(lobbyId);
+            var player = lobby?.Players.FirstOrDefault(p => p.UserId == userId);
+            if (lobby is null || player is null)
+                throw new LobbyNotFoundException(lobbyId);
+            if (lobby.Status == LobbyStatus.InGame)
+                throw new LobbyConflictException("The game has already started.");
+            if (player.IsReady == ready)
+                return LobbyDto.FromEntity(lobby);
+
+            var after = Clone(lobby);
+            after.Players.First(p => p.UserId == userId).IsReady = ready;
+
+            if (await repository.TryUpdateAsync(lobby, after) == LobbyUpdateResult.Updated)
+                return LobbyDto.FromEntity(after);
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    public async Task<StartGameResponse> StartAsync(Guid lobbyId, int userId, string accessToken,
+        CancellationToken cancellationToken = default)
+    {
+        // GameService is called once. If the lobby changes before it is marked InGame, the start is only
+        // completed when the fresh lobby still has exactly the players the game was created with.
+        Guid? gameId = null;
+        int[] gamePlayers = [];
+
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await repository.GetAsync(lobbyId);
+            if (lobby is null || lobby.Players.All(p => p.UserId != userId))
+                throw new LobbyNotFoundException(lobbyId);
+            EnsureCanStart(lobby, userId);
+
+            var playerIds = lobby.Players.Select(p => p.UserId).ToArray();
+            if (gameId is null)
+            {
+                // Throws GameServiceUnavailableException (502); nothing has been written, so the lobby stays Waiting.
+                gameId = await gameService.CreateGameAsync(ToCreateGameRequest(lobby), accessToken, cancellationToken);
+                gamePlayers = playerIds;
+            }
+            else if (!playerIds.SequenceEqual(gamePlayers))
+            {
+                throw new LobbyConflictException("The players changed while the game was starting. Please try again.");
+            }
+
+            var after = Clone(lobby);
+            after.Status = LobbyStatus.InGame;
+            after.GameId = gameId;
+
+            if (await repository.TryStartAsync(lobby, after) == LobbyUpdateResult.Updated)
+                return new StartGameResponse(gameId.Value);
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    private static void EnsureCanStart(Lobby lobby, int userId)
+    {
+        if (lobby.HostUserId != userId)
+            throw new LobbyForbiddenException("Only the host can start the game.");
+        if (lobby.Status == LobbyStatus.InGame)
+            throw new LobbyConflictException("The game has already started.");
+        if (lobby.Players.Count < MinPlayers)
+            throw new LobbyConflictException($"At least {MinPlayers} players are needed to start the game.");
+        if (lobby.Players.Any(p => !p.IsReady))
+            throw new LobbyConflictException("Not all players are ready.");
+    }
+
+    private static CreateGameRequest ToCreateGameRequest(Lobby lobby) => new(
+        lobby.Id,
+        lobby.Settings.CategoryId,
+        lobby.Settings.CategoryName,
+        lobby.Settings.Rounds,
+        lobby.Settings.AnswerTimeSeconds,
+        lobby.Players.Select(p => new GamePlayerDto(p.UserId, p.UserName)).ToList());
 
     // Reads the lobby, applies the join rules and writes it with compare-and-swap.
     // If another request changed the lobby in between, the whole thing is retried on fresh data.

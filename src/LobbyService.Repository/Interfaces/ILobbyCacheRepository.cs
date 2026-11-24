@@ -36,6 +36,15 @@ public interface ILobbyCacheRepository
     // If `after` is null the lobby is deleted together with its code and its lobbies:public entry.
     Task<LobbyUpdateResult> TryLeaveAsync(Lobby before, Lobby? after, int userId);
 
+    // Compare-and-swap: replaces `before` with `after` (e.g. a changed ready flag) if the stored lobby
+    // still equals `before`. Renews all TTLs.
+    Task<LobbyUpdateResult> TryUpdateAsync(Lobby before, Lobby after);
+
+    // Compare-and-swap for a started game: stores `after` (status InGame) with StartedLobbyTtl, removes it
+    // from lobbies:public, deletes its code and every player's user-lobby key, so the players can join
+    // new lobbies. Nothing is written if the stored lobby no longer equals `before`.
+    Task<LobbyUpdateResult> TryStartAsync(Lobby before, Lobby after);
+
     // Id of the lobby the user is currently in, or null.
     Task<Guid?> GetLobbyIdForUserAsync(int userId);
 

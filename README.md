@@ -28,6 +28,8 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | `POST` | `/api/lobbies` | Create a lobby. Body `{ categoryId, answerTimeSeconds, rounds, maxPlayers, isPrivate }`. `answerTimeSeconds` ∈ {15, 30, 45, 60}, `rounds` ∈ {5, 10, 15, 20}, `maxPlayers` 2–8. The playlist (`categoryId`) is fetched from MusicService and must have at least `rounds + 1` songs. Returns `201` with a `LobbyDto`, `400` for invalid values, an unknown playlist or too few songs, `401` without a valid token, and `409` if the user is already in a lobby. |
 | `GET` | `/api/lobbies` | Public lobbies waiting for players, newest first. Full lobbies are included (the frontend shows them as full). Returns `200` with `[{ id, hostUserName, categoryName, playerCount, maxPlayers, rounds, answerTimeSeconds }]` (empty array if none) and `401` without a valid token. |
 | `GET` | `/api/lobbies/{id}` | Full `LobbyDto` including players and ready status. Returns `200`, `401` without a valid token, and `404` if the lobby does not exist or is private and the caller is not one of its players. |
+| `POST` | `/api/lobbies/{id}/ready` | Body `{ ready: bool }`. Sets the caller's ready flag. Returns `200` with the `LobbyDto`, `404` if the lobby does not exist or the caller is not in it, and `409` if the game has started. |
+| `POST` | `/api/lobbies/{id}/start` | Host only. Calls GameService `POST /api/games` with `{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }` and the host's token. Returns `200` with `{ gameId }`, `403` if the caller is not host, `404` if the caller is not in the lobby, `409` with fewer than 2 players, not everyone ready or the game already started, and `502` if GameService fails (the lobby stays `Waiting`). On success the lobby becomes `InGame` with `gameId`, leaves `lobbies:public`, its code and every player's `user-lobby` key are deleted (so they can join new lobbies), and it expires 10 minutes later. |
 
 ### Redis keys
 
@@ -38,7 +40,7 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | `user-lobby:{userId}` | Id of the lobby the user is in |
 | `lobbies:public` | Set of ids of public lobbies with status `Waiting`, so `GET /api/lobbies` needs no `SCAN` |
 
-Waiting lobbies expire after 2 hours without changes. Every write renews the TTL.
+Waiting lobbies expire after 2 hours without changes. Every write renews the TTL. A started (`InGame`) lobby expires 10 minutes after the start.
 
 `lobbies:public` has no TTL. A lobby id is added when a public lobby is created and must be removed (`RemoveFromPublicAsync`) when the lobby starts, becomes private or is deleted. Ids whose lobby has expired or is no longer public and waiting are also pruned when the list is read.
 
@@ -48,6 +50,7 @@ Waiting lobbies expire after 2 hours without changes. Every write renews the TTL
 |---|---|---|
 | `ConnectionStrings:Redis` | `localhost:6379` | Redis connection string |
 | `MusicService:BaseUrl` | `http://localhost:5002` | MusicService base URL (used for `GET /api/playlists/{id}`, which returns `{ id, name, songCount }` per SCRUM-92) |
+| `Services:GameService` | `http://localhost:5005` | GameService base URL (env `Services__GameService`), used for `POST /api/games` when the host starts the game |
 | `Jwt:SigningKey` | *(empty)* | Same symmetric key as UserService. It lives in OpenBao at `kv/quiz/jwt` (property `signing-key`); in the cluster it arrives as `Jwt__SigningKey` via ExternalSecret. Locally, put it in `.env` (see below), never in `appsettings.json`. Without it every token is rejected. |
 | `Jwt:Issuer` | `slopster-userservice` | Expected token issuer |
 | `Jwt:Audience` | `slopster` | Expected token audience |
