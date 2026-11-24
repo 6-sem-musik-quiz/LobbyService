@@ -54,6 +54,7 @@ Hub: `/hubs/lobby`, and `/api/hubs/lobby`, which is where the edge forwards the 
 | `lobbycode:{code}` | Lobby id (private lobbies only; 6 chars from `A-Z2-9` without `0/O/1/I`) |
 | `user-lobby:{userId}` | Id of the lobby the user is in |
 | `lobbies:public` | Set of ids of public lobbies with status `Waiting`, so `GET /api/lobbies` needs no `SCAN` |
+| `lobbies:waiting`, `lobbies:ingame` | Sorted sets of lobby ids (score = expiry, unix seconds) used only for the `slopster_lobbies_active` metric. Expired ids are removed when the metric is read. |
 
 Waiting lobbies expire after 2 hours without changes. Every write renews the TTL. A started (`InGame`) lobby expires 10 minutes after the start.
 
@@ -69,6 +70,36 @@ Waiting lobbies expire after 2 hours without changes. Every write renews the TTL
 | `Jwt:SigningKey` | *(empty)* | Same symmetric key as UserService. It lives in OpenBao at `kv/quiz/jwt` (property `signing-key`); in the cluster it arrives as `Jwt__SigningKey` via ExternalSecret. Locally, put it in `.env` (see below), never in `appsettings.json`. Without it every token is rejected. |
 | `Jwt:Issuer` | `slopster-userservice` | Expected token issuer |
 | `Jwt:Audience` | `slopster` | Expected token audience |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector that receives the metrics (standard OpenTelemetry variable) |
+| `OTEL_SERVICE_NAME` | *(assembly name)* | Service name on the metrics (standard OpenTelemetry variable) |
+
+## Metrics
+
+Metrics are exported with OpenTelemetry over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`) and reach Prometheus through the collector. The meter is `Slopster.Lobby`.
+
+| Metric (Prometheus name) | Type | Attributes | Meaning |
+|---|---|---|---|
+| `slopster_lobbies_active` | ObservableGauge | `status` = `waiting` \| `in_game` | Number of lobbies. Refreshed from Redis every 20 s; nothing is reported while Redis is unreachable. A started lobby counts as `in_game` until its key expires (10 min). |
+| `slopster_lobby_cache_lookups_total` | Counter | `result` = `hit` \| `miss` | Lookups in `LobbyCacheRepository` (lobby by id, lobby id by code, lobby id by user). |
+| `http_server_request_duration_seconds` | Histogram | `http_route`, `http_response_status_code`, ... | Response times per endpoint, from ASP.NET Core's built-in `http.server.request.duration` (instrumentation is enabled). |
+
+Lobbies that were already in Redis when the sorted sets were introduced are not counted; they expire within 2 hours.
+
+Example PromQL for Grafana:
+
+```promql
+# Active lobbies by status
+sum by (status) (slopster_lobbies_active)
+
+# Redis cache hit ratio over 5 minutes
+sum(rate(slopster_lobby_cache_lookups_total{result="hit"}[5m]))
+  / sum(rate(slopster_lobby_cache_lookups_total[5m]))
+
+# 95th percentile response time per endpoint
+histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket[5m])))
+```
+
+The Grafana dashboard JSON is not part of this repository.
 
 ## Running locally
 

@@ -1,4 +1,5 @@
 using LobbyService.Domain.Entities;
+using LobbyService.Repository.Metrics;
 
 namespace LobbyService.Repository.Interfaces;
 
@@ -64,4 +65,8 @@ public interface ILobbyCacheRepository
 
     // Removes the lobby from the lobbies:public set. Call when it starts, becomes private or is deleted.
     Task RemoveFromPublicAsync(Guid lobbyId);
+
+    // Number of waiting and started (InGame) lobbies, read from two Redis sorted sets
+    // (lobbies:waiting, lobbies:ingame) without SCAN. Used by the slopster_lobbies_active gauge.
+    Task<LobbyCounts> CountByStatusAsync();
 }

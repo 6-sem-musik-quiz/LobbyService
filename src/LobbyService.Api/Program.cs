@@ -8,7 +8,9 @@ using LobbyService.Service.Hubs;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using LobbyService.Repository.Metrics;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -72,6 +74,14 @@ builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("R
 builder.Services.AddServiceLayer(
     builder.Configuration["MusicService:BaseUrl"],
     builder.Configuration["Services:GameService"]); // env Services__GameService
+
+// Metrics over OTLP. The collector address comes from OTEL_EXPORTER_OTLP_ENDPOINT (default
+// http://localhost:4317) and the service name from OTEL_SERVICE_NAME.
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics
+        .AddAspNetCoreInstrumentation() // http.server.request.duration
+        .AddMeter(LobbyMetrics.MeterName)
+        .AddOtlpExporter());
 
 var app = builder.Build();
 

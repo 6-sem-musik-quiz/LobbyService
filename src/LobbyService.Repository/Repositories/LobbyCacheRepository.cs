@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using LobbyService.Domain.Entities;
 using LobbyService.Repository.Interfaces;
+using LobbyService.Repository.Metrics;
 using StackExchange.Redis;
 
 namespace LobbyService.Repository.Repositories;
@@ -11,14 +12,18 @@ namespace LobbyService.Repository.Repositories;
 //   lobbycode:{code}    -> lobby id (private lobbies only)
 //   user-lobby:{userId} -> lobby id
 //   lobbies:public      -> set of ids of public waiting lobbies (so listing needs no SCAN)
+//   lobbies:waiting     -> sorted set of waiting lobby ids, score = expiry (unix seconds); for metrics only
+//   lobbies:ingame      -> same for started lobbies; counted until their key expires
 // Waiting lobbies expire after 2 hours without changes; every write renews the TTL.
 // A started lobby expires 10 minutes after the start, and its code and user-lobby keys are deleted.
 // The set has no TTL; ids of expired lobbies are pruned when the list is read.
-public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRepository
+public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics metrics) : ILobbyCacheRepository
 {
     public static readonly TimeSpan WaitingLobbyTtl = TimeSpan.FromHours(2);
     public static readonly TimeSpan StartedLobbyTtl = TimeSpan.FromMinutes(10);
     public const string PublicLobbiesKey = "lobbies:public";
+    public const string WaitingLobbiesKey = "lobbies:waiting";
+    public const string InGameLobbiesKey = "lobbies:ingame";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -34,12 +39,14 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
     public async Task<Lobby?> GetAsync(Guid lobbyId)
     {
         var json = await Db.StringGetAsync(LobbyKey(lobbyId));
+        metrics.RecordLookup(!json.IsNullOrEmpty);
         return json.IsNullOrEmpty ? null : JsonSerializer.Deserialize<Lobby>(json.ToString(), JsonOptions);
     }
 
     public async Task<Guid?> GetLobbyIdForUserAsync(int userId)
     {
         var value = await Db.StringGetAsync(UserLobbyKey(userId));
+        metrics.RecordLookup(!value.IsNullOrEmpty);
         return Guid.TryParse(value.ToString(), out var id) ? id : null;
     }
 
@@ -66,6 +73,7 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
 
         _ = tran.StringSetAsync(LobbyKey(lobby.Id), JsonSerializer.Serialize(lobby, JsonOptions), WaitingLobbyTtl);
         _ = tran.StringSetAsync(UserLobbyKey(lobby.HostUserId), id, WaitingLobbyTtl);
+        _ = tran.SortedSetAddAsync(WaitingLobbiesKey, id, ExpiresAt(WaitingLobbyTtl));
         if (IsPublicWaiting(lobby))
             _ = tran.SetAddAsync(PublicLobbiesKey, id);
 
@@ -80,6 +88,7 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
     public async Task<Guid?> GetLobbyIdByCodeAsync(string code)
     {
         var value = await Db.StringGetAsync(CodeKey(code));
+        metrics.RecordLookup(!value.IsNullOrEmpty);
         return Guid.TryParse(value.ToString(), out var id) ? id : null;
     }
 
@@ -114,6 +123,7 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
             if (before.Code is not null)
                 _ = tran.KeyDeleteAsync(CodeKey(before.Code));
             _ = tran.SetRemoveAsync(PublicLobbiesKey, before.Id.ToString());
+            _ = tran.SortedSetRemoveAsync(WaitingLobbiesKey, before.Id.ToString());
         }
         else
         {
@@ -139,6 +149,8 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
 
         _ = tran.StringSetAsync(LobbyKey(after.Id), Serialize(after), StartedLobbyTtl);
         _ = tran.SetRemoveAsync(PublicLobbiesKey, after.Id.ToString());
+        _ = tran.SortedSetRemoveAsync(WaitingLobbiesKey, after.Id.ToString());
+        _ = tran.SortedSetAddAsync(InGameLobbiesKey, after.Id.ToString(), ExpiresAt(StartedLobbyTtl));
         if (before.Code is not null)
             _ = tran.KeyDeleteAsync(CodeKey(before.Code));
         foreach (var player in before.Players)
@@ -151,10 +163,26 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
     private static void WriteLobby(ITransaction tran, Lobby lobby)
     {
         _ = tran.StringSetAsync(LobbyKey(lobby.Id), Serialize(lobby), WaitingLobbyTtl);
+        _ = tran.SortedSetAddAsync(WaitingLobbiesKey, lobby.Id.ToString(), ExpiresAt(WaitingLobbyTtl));
         if (lobby.Code is not null)
             _ = tran.KeyExpireAsync(CodeKey(lobby.Code), WaitingLobbyTtl);
         foreach (var player in lobby.Players)
             _ = tran.KeyExpireAsync(UserLobbyKey(player.UserId), WaitingLobbyTtl);
+    }
+
+    private static double ExpiresAt(TimeSpan ttl) => DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
+
+    // Drops expired ids from both sorted sets, then counts what is left. No SCAN.
+    public async Task<LobbyCounts> CountByStatusAsync()
+    {
+        var db = Db;
+        var now = (double)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        await Task.WhenAll(
+            db.SortedSetRemoveRangeByScoreAsync(WaitingLobbiesKey, double.NegativeInfinity, now),
+            db.SortedSetRemoveRangeByScoreAsync(InGameLobbiesKey, double.NegativeInfinity, now));
+        var waiting = db.SortedSetLengthAsync(WaitingLobbiesKey);
+        var inGame = db.SortedSetLengthAsync(InGameLobbiesKey);
+        return new LobbyCounts(await waiting, await inGame);
     }
 
     private static string Serialize(Lobby lobby) => JsonSerializer.Serialize(lobby, JsonOptions);
