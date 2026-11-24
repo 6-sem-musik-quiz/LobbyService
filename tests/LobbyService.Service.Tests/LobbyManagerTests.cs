@@ -192,6 +192,115 @@ public class LobbyManagerTests
 
         await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.CreateAsync(ValidRequest(), UserId, UserName, Token));
     }
+
+    private static readonly DateTimeOffset BaseTime = new(2026, 11, 24, 12, 0, 0, TimeSpan.Zero);
+
+    private static Lobby MakeLobby(int minutesAfterBase, bool isPrivate = false, LobbyStatus status = LobbyStatus.Waiting,
+        int players = 1, int maxPlayers = 4, params int[] userIds) => new()
+    {
+        Id = Guid.NewGuid(),
+        HostUserId = userIds.Length > 0 ? userIds[0] : 1,
+        IsPrivate = isPrivate,
+        Code = isPrivate ? "PRIV23" : null,
+        Settings = new LobbySettings
+        {
+            CategoryId = 3, CategoryName = "Rock", AnswerTimeSeconds = 45, Rounds = 15, MaxPlayers = maxPlayers
+        },
+        Players = (userIds.Length > 0 ? userIds : Enumerable.Range(1, players).ToArray())
+            .Select(id => new LobbyPlayer { UserId = id, UserName = $"user{id}" }).ToList(),
+        Status = status,
+        CreatedAt = BaseTime.AddMinutes(minutesAfterBase)
+    };
+
+    [Fact]
+    public async Task GetOpenLobbiesAsync_ExcludesPrivateAndStartedLobbies()
+    {
+        var open = MakeLobby(0);
+        _repository.GetPublicWaitingAsync().Returns(
+            [open, MakeLobby(1, isPrivate: true), MakeLobby(2, status: LobbyStatus.InGame)]);
+
+        var result = await _sut.GetOpenLobbiesAsync();
+
+        Assert.Equal(open.Id, Assert.Single(result).Id);
+    }
+
+    [Fact]
+    public async Task GetOpenLobbiesAsync_NoLobbies_ReturnsEmptyList()
+    {
+        _repository.GetPublicWaitingAsync().Returns([]);
+
+        var result = await _sut.GetOpenLobbiesAsync();
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task GetOpenLobbiesAsync_IncludesFullLobbies()
+    {
+        var full = MakeLobby(0, players: 4, maxPlayers: 4);
+        _repository.GetPublicWaitingAsync().Returns([full]);
+
+        var row = Assert.Single(await _sut.GetOpenLobbiesAsync());
+
+        Assert.Equal(new LobbySummaryDto(full.Id, "user1", "Rock", 4, 4, 15, 45), row);
+    }
+
+    [Fact]
+    public async Task GetOpenLobbiesAsync_SortsNewestFirst()
+    {
+        var oldest = MakeLobby(0);
+        var newest = MakeLobby(20);
+        var middle = MakeLobby(10);
+        _repository.GetPublicWaitingAsync().Returns([oldest, newest, middle]);
+
+        var result = await _sut.GetOpenLobbiesAsync();
+
+        Assert.Equal([newest.Id, middle.Id, oldest.Id], result.Select(r => r.Id));
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_UnknownLobby_ThrowsNotFound()
+    {
+        var id = Guid.NewGuid();
+        _repository.GetAsync(id).Returns((Lobby?)null);
+
+        var ex = await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.GetByIdAsync(id, UserId));
+        Assert.Equal(id, ex.LobbyId);
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_PrivateLobbyUserIsNotIn_ThrowsNotFound()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [7, 8]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.GetByIdAsync(lobby.Id, UserId));
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_PrivateLobbyUserIsIn_ReturnsDetailsWithCode()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var result = await _sut.GetByIdAsync(lobby.Id, UserId);
+
+        Assert.Equal("PRIV23", result.Code);
+        Assert.Equal(2, result.Players.Count);
+    }
+
+    [Fact]
+    public async Task GetByIdAsync_PublicLobby_ReturnsDetailsToAnyone()
+    {
+        var lobby = MakeLobby(0, players: 2);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var result = await _sut.GetByIdAsync(lobby.Id, UserId);
+
+        Assert.Equal(lobby.Id, result.Id);
+        Assert.Null(result.Code);
+        Assert.Equal(["user1", "user2"], result.Players.Select(p => p.UserName));
+    }
 }
 
 public class LobbyCodeGeneratorTests

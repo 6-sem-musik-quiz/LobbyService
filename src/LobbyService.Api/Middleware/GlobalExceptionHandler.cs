@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Diagnostics;
 
 namespace LobbyService.Api.Middleware;
 
-// Maps domain exceptions to 400/409 and anything else to a ProblemDetails 500 response.
+// Maps domain exceptions to 400/404/409 and anything else to a ProblemDetails 500 response.
 public class GlobalExceptionHandler(
     ILogger<GlobalExceptionHandler> logger,
     IProblemDetailsService problemDetailsService) : IExceptionHandler
@@ -14,6 +14,7 @@ public class GlobalExceptionHandler(
         {
             LobbyValidationException e => (StatusCodes.Status400BadRequest, "Invalid request.", e.Message),
             LobbyConflictException e => (StatusCodes.Status409Conflict, "Conflict.", e.Message),
+            LobbyNotFoundException e => (StatusCodes.Status404NotFound, "Not found.", e.Message),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred.", null)
         };
 

@@ -28,4 +28,24 @@ public class LobbyController(ILobbyManager lobbyManager) : ControllerBase
         var lobby = await lobbyManager.CreateAsync(request, userId, userName, accessToken, cancellationToken);
         return Created($"/api/lobbies/{lobby.Id}", lobby);
     }
+
+    // Public lobbies waiting for players, newest first. Full lobbies are included.
+    [HttpGet]
+    [ProducesResponseType<IReadOnlyList<LobbySummaryDto>>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<ActionResult<IReadOnlyList<LobbySummaryDto>>> GetOpen() =>
+        Ok(await lobbyManager.GetOpenLobbiesAsync());
+
+    // Private lobbies are only visible to their players (otherwise 404).
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<LobbyDto>> GetById(Guid id)
+    {
+        if (!int.TryParse(User.FindFirst("sub")?.Value, out var userId))
+            return Unauthorized();
+
+        return Ok(await lobbyManager.GetByIdAsync(id, userId));
+    }
 }
