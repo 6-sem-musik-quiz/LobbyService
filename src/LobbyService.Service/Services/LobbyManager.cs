@@ -2,17 +2,23 @@ using LobbyService.Domain.Dtos;
 using LobbyService.Domain.Entities;
 using LobbyService.Domain.Exceptions;
 using LobbyService.Repository.Interfaces;
+using LobbyService.Service.Hubs;
 using LobbyService.Service.Interfaces;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging;
 
 namespace LobbyService.Service.Services;
 
 // Lobby rules: allowed settings, host, max players and playlist.
+// After every successful write the clients in the lobby's SignalR group are notified.
 public class LobbyManager(
     ILobbyCacheRepository repository,
     IMusicServiceClient musicService,
     IGameServiceClient gameService,
     ILobbyCodeGenerator codeGenerator,
-    TimeProvider timeProvider) : ILobbyManager
+    TimeProvider timeProvider,
+    IHubContext<LobbyHub, ILobbyClient> hubContext,
+    ILogger<LobbyManager> logger) : ILobbyManager
 {
     public static readonly IReadOnlySet<int> AllowedAnswerTimes = new HashSet<int> { 15, 30, 45, 60 };
     public static readonly IReadOnlySet<int> AllowedRounds = new HashSet<int> { 5, 10, 15, 20 };
@@ -139,7 +145,16 @@ public class LobbyManager(
             }
 
             if (await repository.TryLeaveAsync(lobby, after, userId) == LobbyUpdateResult.Updated)
+            {
+                if (after is null)
+                    await NotifyAsync(lobbyId, client => client.LobbyClosed());
+                else
+                {
+                    var dto = LobbyDto.FromEntity(after);
+                    await NotifyAsync(lobbyId, client => client.LobbyUpdated(dto));
+                }
                 return;
+            }
         }
 
         throw new LobbyConflictException("The lobby is busy. Please try again.");
@@ -162,7 +177,11 @@ public class LobbyManager(
             after.Players.First(p => p.UserId == userId).IsReady = ready;
 
             if (await repository.TryUpdateAsync(lobby, after) == LobbyUpdateResult.Updated)
-                return LobbyDto.FromEntity(after);
+            {
+                var dto = LobbyDto.FromEntity(after);
+                await NotifyAsync(lobbyId, client => client.LobbyUpdated(dto));
+                return dto;
+            }
         }
 
         throw new LobbyConflictException("The lobby is busy. Please try again.");
@@ -200,7 +219,11 @@ public class LobbyManager(
             after.GameId = gameId;
 
             if (await repository.TryStartAsync(lobby, after) == LobbyUpdateResult.Updated)
-                return new StartGameResponse(gameId.Value);
+            {
+                var response = new StartGameResponse(gameId.Value);
+                await NotifyAsync(lobbyId, client => client.GameStarted(response));
+                return response;
+            }
         }
 
         throw new LobbyConflictException("The lobby is busy. Please try again.");
@@ -249,7 +272,9 @@ public class LobbyManager(
             switch (await repository.TryJoinAsync(lobby, after, userId))
             {
                 case LobbyUpdateResult.Updated:
-                    return LobbyDto.FromEntity(after);
+                    var dto = LobbyDto.FromEntity(after);
+                    await NotifyAsync(after.Id, client => client.LobbyUpdated(dto));
+                    return dto;
                 case LobbyUpdateResult.UserInOtherLobby:
                     throw new LobbyConflictException("You are already in another lobby.");
                 case LobbyUpdateResult.Stale:
@@ -258,6 +283,20 @@ public class LobbyManager(
         }
 
         throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    // The change is already stored when this runs, so a failed push is logged instead of failing the request.
+    // Clients that miss a message still get the current state from GET /api/lobbies/{id}.
+    private async Task NotifyAsync(Guid lobbyId, Func<ILobbyClient, Task> send)
+    {
+        try
+        {
+            await send(hubContext.Clients.Group(LobbyHub.GroupName(lobbyId)));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not send the SignalR update for lobby {LobbyId}.", lobbyId);
+        }
     }
 
     // Copy used as the new state, so the original can still be compared with what is stored.

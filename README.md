@@ -31,6 +31,20 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | `POST` | `/api/lobbies/{id}/ready` | Body `{ ready: bool }`. Sets the caller's ready flag. Returns `200` with the `LobbyDto`, `404` if the lobby does not exist or the caller is not in it, and `409` if the game has started. |
 | `POST` | `/api/lobbies/{id}/start` | Host only. Calls GameService `POST /api/games` with `{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }` and the host's token. Returns `200` with `{ gameId }`, `403` if the caller is not host, `404` if the caller is not in the lobby, `409` with fewer than 2 players, not everyone ready or the game already started, and `502` if GameService fails (the lobby stays `Waiting`). On success the lobby becomes `InGame` with `gameId`, leaves `lobbies:public`, its code and every player's `user-lobby` key are deleted (so they can join new lobbies), and it expires 10 minutes later. |
 
+### Live updates (SignalR)
+
+Hub: `/hubs/lobby` (the edge route and WebSocket upgrade for it are not configured in this repo). Requires the same JWT; for WebSockets the token is sent as `?access_token=<token>` (only accepted on the hub path). Enums are serialised as strings, as in REST.
+
+| Direction | Method | Description |
+|---|---|---|
+| client → server | `JoinLobbyGroup(Guid lobbyId)` | Subscribe to group `lobby:{id}`. Throws `HubException` if the caller is not in the lobby. Call after joining via REST and again after a reconnect. |
+| client → server | `LeaveLobbyGroup(Guid lobbyId)` | Unsubscribe. Does not leave the lobby (use `POST /api/lobbies/{id}/leave`). |
+| server → group | `LobbyUpdated(LobbyDto)` | After a join, leave, ready change or host change. Not sent for no-ops (already joined, ready flag unchanged). |
+| server → group | `GameStarted({ gameId })` | After the host has started the game. |
+| server → group | `LobbyClosed()` | When the last player left and the lobby was deleted. |
+
+`LobbyManager` sends the messages via `IHubContext` after the change is stored; a failed send is logged and does not fail the request. A dropped connection does not change the lobby. With more than one replica a SignalR backplane (e.g. Redis) is needed so every pod reaches every group.
+
 ### Redis keys
 
 | Key | Value |

@@ -2,9 +2,13 @@ using LobbyService.Domain.Dtos;
 using LobbyService.Domain.Entities;
 using LobbyService.Domain.Exceptions;
 using LobbyService.Repository.Interfaces;
+using LobbyService.Service.Hubs;
 using LobbyService.Service.Interfaces;
 using LobbyService.Service.Services;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 
 namespace LobbyService.Service.Tests;
 
@@ -18,6 +22,9 @@ public class LobbyManagerTests
     private readonly IMusicServiceClient _musicService = Substitute.For<IMusicServiceClient>();
     private readonly ILobbyCodeGenerator _codeGenerator = Substitute.For<ILobbyCodeGenerator>();
     private readonly IGameServiceClient _gameService = Substitute.For<IGameServiceClient>();
+    private readonly IHubContext<LobbyHub, ILobbyClient> _hubContext = Substitute.For<IHubContext<LobbyHub, ILobbyClient>>();
+    private readonly IHubClients<ILobbyClient> _hubClients = Substitute.For<IHubClients<ILobbyClient>>();
+    private readonly ILobbyClient _group = Substitute.For<ILobbyClient>();
     private readonly LobbyManager _sut;
 
     public LobbyManagerTests()
@@ -27,8 +34,11 @@ public class LobbyManagerTests
         _musicService.GetPlaylistAsync(Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new PlaylistDto(1, "90'er hits", 50));
         _codeGenerator.Generate().Returns("ABC234");
+        _hubContext.Clients.Returns(_hubClients);
+        _hubClients.Group(Arg.Any<string>()).Returns(_group);
 
-        _sut = new LobbyManager(_repository, _musicService, _gameService, _codeGenerator, TimeProvider.System);
+        _sut = new LobbyManager(_repository, _musicService, _gameService, _codeGenerator, TimeProvider.System,
+            _hubContext, NullLogger<LobbyManager>.Instance);
     }
 
     private static CreateLobbyRequest ValidRequest(bool isPrivate = false) =>
@@ -799,6 +809,210 @@ public class LobbyManagerTests
     {
         await _gameService.DidNotReceiveWithAnyArgs().CreateGameAsync(default!, default!, default);
         await _repository.DidNotReceiveWithAnyArgs().TryStartAsync(default!, default!);
+    }
+
+    // ---- SignalR notifications ----
+
+    private void AssertSentOnlyToGroupOf(Guid lobbyId)
+    {
+        _hubClients.Received(1).Group($"lobby:{lobbyId}");
+        _hubClients.DidNotReceive().Group(Arg.Is<string>(g => g != $"lobby:{lobbyId}"));
+        Assert.Single(_group.ReceivedCalls());
+    }
+
+    private void AssertNothingSent()
+    {
+        Assert.Empty(_hubClients.ReceivedCalls());
+        Assert.Empty(_group.ReceivedCalls());
+    }
+
+    [Fact]
+    public void GroupName_IsLobbyColonId()
+    {
+        var id = Guid.NewGuid();
+
+        Assert.Equal($"lobby:{id}", LobbyHub.GroupName(id));
+    }
+
+    [Fact]
+    public async Task JoinAsync_Success_SendsLobbyUpdatedToLobbyGroup()
+    {
+        var lobby = MakeLobby(0, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupJoinUpdated();
+
+        var result = await _sut.JoinAsync(lobby.Id, UserId, UserName);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyUpdated(result);
+        await _group.Received(1).LobbyUpdated(Arg.Is<LobbyDto>(d => d.Players.Count == 2 && d.Players[1].UserId == UserId));
+    }
+
+    [Fact]
+    public async Task JoinByCodeAsync_Success_SendsLobbyUpdatedToLobbyGroup()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [7]);
+        _repository.GetLobbyIdByCodeAsync("PRIV23").Returns(lobby.Id);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupJoinUpdated();
+
+        var result = await _sut.JoinByCodeAsync("priv23", UserId, UserName);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyUpdated(result);
+    }
+
+    [Fact]
+    public async Task JoinAsync_AlreadyInLobby_SendsNothing()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await _sut.JoinAsync(lobby.Id, UserId, UserName);
+
+        AssertNothingSent();
+    }
+
+    [Fact]
+    public async Task JoinAsync_Fails_SendsNothing()
+    {
+        var lobby = MakeLobby(0, maxPlayers: 2, userIds: [7, 8]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+
+        AssertNothingSent();
+    }
+
+    [Fact]
+    public async Task JoinAsync_StaleThenUpdated_SendsOnlyOnce()
+    {
+        var first = MakeLobby(0, userIds: [7]);
+        var fresh = MakeLobby(0, userIds: [7, 8]);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        _repository.TryJoinAsync(first, Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.Stale);
+        _repository.TryJoinAsync(fresh, Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.Updated);
+
+        await _sut.JoinAsync(first.Id, UserId, UserName);
+
+        AssertSentOnlyToGroupOf(first.Id);
+        await _group.Received(1).LobbyUpdated(Arg.Is<LobbyDto>(d => d.Players.Count == 3));
+    }
+
+    [Fact]
+    public async Task LeaveAsync_NonHostLeaves_SendsLobbyUpdatedWithoutPlayer()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyUpdated(Arg.Is<LobbyDto>(d =>
+            d.HostUserId == 7 && d.Players.Select(p => p.UserId).SequenceEqual(new[] { 7 })));
+    }
+
+    [Fact]
+    public async Task LeaveAsync_HostLeaves_SendsLobbyUpdatedWithNewHost()
+    {
+        var lobby = MakeLobby(0, userIds: [UserId, 8, 9]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyUpdated(Arg.Is<LobbyDto>(d => d.HostUserId == 8 && d.Players.Count == 2));
+    }
+
+    [Fact]
+    public async Task LeaveAsync_LastPlayerLeaves_SendsLobbyClosed()
+    {
+        var lobby = MakeLobby(0, userIds: [UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyClosed();
+    }
+
+    [Fact]
+    public async Task LeaveAsync_Fails_SendsNothing()
+    {
+        var lobby = MakeLobby(0, status: LobbyStatus.InGame, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.LeaveAsync(lobby.Id, UserId));
+
+        AssertNothingSent();
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_Changed_SendsLobbyUpdated()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryUpdateAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Updated);
+
+        var result = await _sut.SetReadyAsync(lobby.Id, UserId, true);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).LobbyUpdated(result);
+        await _group.Received(1).LobbyUpdated(Arg.Is<LobbyDto>(d => d.Players[1].IsReady));
+    }
+
+    [Fact]
+    public async Task SetReadyAsync_Unchanged_SendsNothing()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        lobby.Players[1].IsReady = true;
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await _sut.SetReadyAsync(lobby.Id, UserId, true);
+
+        AssertNothingSent();
+    }
+
+    [Fact]
+    public async Task StartAsync_Success_SendsGameStartedWithGameId()
+    {
+        var lobby = ReadyLobby();
+        SetupStartSucceeds();
+
+        await _sut.StartAsync(lobby.Id, UserId, Token);
+
+        AssertSentOnlyToGroupOf(lobby.Id);
+        await _group.Received(1).GameStarted(new StartGameResponse(GameId));
+    }
+
+    [Fact]
+    public async Task StartAsync_GameServiceFails_SendsNothing()
+    {
+        var lobby = ReadyLobby();
+        _gameService.CreateGameAsync(Arg.Any<CreateGameRequest>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new GameServiceUnavailableException("down"));
+
+        await Assert.ThrowsAsync<GameServiceUnavailableException>(() => _sut.StartAsync(lobby.Id, UserId, Token));
+
+        AssertNothingSent();
+    }
+
+    [Fact]
+    public async Task SendFails_ChangeIsStillReturned()
+    {
+        // The lobby is already stored, so a SignalR failure must not turn the request into an error.
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryUpdateAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>()).Returns(LobbyUpdateResult.Updated);
+        _group.LobbyUpdated(Arg.Any<LobbyDto>()).ThrowsAsync(new InvalidOperationException("backplane down"));
+
+        var result = await _sut.SetReadyAsync(lobby.Id, UserId, true);
+
+        Assert.True(result.Players[1].IsReady);
     }
 }
 

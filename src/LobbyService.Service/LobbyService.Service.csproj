@@ -1,9 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
-    <ProjectReference Include="..\LobbyService.Domain\LobbyService.Domain.csproj" />
-    <ProjectReference Include="..\LobbyService.Repository\LobbyService.Repository.csproj" />
+    <!-- SignalR hub and IHubContext live in the service layer so LobbyManager can push updates.
+         The shared framework also provides Microsoft.Extensions.Http (AddHttpClient). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.15" />
+    <ProjectReference Include="..\LobbyService.Domain\LobbyService.Domain.csproj" />
+    <ProjectReference Include="..\LobbyService.Repository\LobbyService.Repository.csproj" />
   </ItemGroup>
 </Project>

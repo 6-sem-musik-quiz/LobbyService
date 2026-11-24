@@ -4,6 +4,7 @@ using LobbyService.Api.HealthChecks;
 using LobbyService.Api.Middleware;
 using LobbyService.Repository.Extensions;
 using LobbyService.Service.Extensions;
+using LobbyService.Service.Hubs;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -43,11 +44,27 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
                 : new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
             NameClaimType = "unique_name"
         };
+        // Browsers cannot set headers on WebSockets, so SignalR sends the token as ?access_token=.
+        // Only accepted for the hub, so tokens in query strings are not allowed on the REST API.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs/lobby"))
+                    context.Token = accessToken;
+                return Task.CompletedTask;
+            }
+        };
     });
 builder.Services.AddAuthorization(options =>
 {
     options.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
 });
+
+// Enums as strings, same as the REST API ("Waiting", "InGame").
+builder.Services.AddSignalR()
+    .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("Redis"));
 builder.Services.AddServiceLayer(
@@ -68,6 +85,8 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+// Requires a JWT through the fallback policy.
+app.MapHub<LobbyHub>("/hubs/lobby");
 app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }).AllowAnonymous();
 
