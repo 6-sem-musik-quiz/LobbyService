@@ -3,12 +3,15 @@ using Microsoft.AspNetCore.SignalR;
 
 namespace LobbyService.Service.Hubs;
 
-// SignalR hub at /hubs/lobby. Clients only subscribe to a lobby's group here; every change to a lobby
+// SignalR hub at /hubs/lobby, and at /api/hubs/lobby where the edge forwards /api/lobbyservice/hubs/lobby. Clients only subscribe to a lobby's group here; every change to a lobby
 // goes through the REST API, and LobbyManager pushes the result via IHubContext.
 // OnDisconnectedAsync is deliberately not overridden: a dropped connection does not change the lobby,
 // so the player can reconnect and call JoinLobbyGroup again.
 public class LobbyHub(ILobbyCacheRepository repository) : Hub<ILobbyClient>
 {
+    public const string Path = "/hubs/lobby";
+    public const string EdgePath = "/api/hubs/lobby";
+
     public static string GroupName(Guid lobbyId) => $"lobby:{lobbyId}";
 
     public async Task JoinLobbyGroup(Guid lobbyId)

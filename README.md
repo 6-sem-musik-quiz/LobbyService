@@ -33,7 +33,7 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 
 ### Live updates (SignalR)
 
-Hub: `/hubs/lobby` (the edge route and WebSocket upgrade for it are not configured in this repo). Requires the same JWT; for WebSockets the token is sent as `?access_token=<token>` (only accepted on the hub path). Enums are serialised as strings, as in REST.
+Hub: `/hubs/lobby`, and `/api/hubs/lobby`, which is where the edge forwards the public path `/api/lobbyservice/hubs/lobby` (the edge strips the service name). Requires the same JWT; for WebSockets the token is sent as `?access_token=<token>` (only accepted on the hub path). Enums are serialised as strings, as in REST.
 
 | Direction | Method | Description |
 |---|---|---|

@@ -32,11 +32,11 @@ public class LobbyHubTests(LobbyApiFactory factory) : IClassFixture<LobbyApiFact
 
     // WebSockets like a browser: negotiate sends the token as a Bearer header, the WebSocket itself
     // sends it as ?access_token= (browsers cannot set headers on WebSockets).
-    private HubConnection ConnectionFor(string? token)
+    private HubConnection ConnectionFor(string? token, string path = "/hubs/lobby")
     {
         var server = factory.Server;
         var connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(server.BaseAddress, "/hubs/lobby"), options =>
+            .WithUrl(new Uri(server.BaseAddress, path), options =>
             {
                 options.Transports = HttpTransportType.WebSockets;
                 options.HttpMessageHandlerFactory = _ => server.CreateHandler();
@@ -98,6 +98,28 @@ public class LobbyHubTests(LobbyApiFactory factory) : IClassFixture<LobbyApiFact
 
         // Once in the lobby, B may subscribe to the group as well.
         await other.InvokeAsync("JoinLobbyGroup", lobbyId);
+    }
+
+    // The edge forwards /api/lobbyservice/hubs/lobby as /api/hubs/lobby; that path must work too,
+    // including the ?access_token= on the WebSocket.
+    [Fact]
+    public async Task HubBehindTheEdgePath_Works()
+    {
+        var create = await ClientFor(3051, "host").PostAsJsonAsync("/api/lobbies", new
+        {
+            categoryId = LobbyApiFactory.KnownPlaylistId, answerTimeSeconds = 30, rounds = 10, maxPlayers = 4,
+            isPrivate = false
+        });
+        var lobbyId = (await create.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+        var host = ConnectionFor(LobbyApiFactory.CreateToken(3051, "host"), "/api/hubs/lobby");
+        await host.StartAsync();
+        await host.InvokeAsync("JoinLobbyGroup", lobbyId);
+        var updated = Listen<JsonElement>(host, "LobbyUpdated");
+
+        await ClientFor(3052, "bob").PostAsync($"/api/lobbies/{lobbyId}/join", null);
+
+        var lobby = await updated.Task.WaitAsync(Timeout);
+        Assert.Equal(2, lobby.GetProperty("players").GetArrayLength());
     }
 
     [Fact]
