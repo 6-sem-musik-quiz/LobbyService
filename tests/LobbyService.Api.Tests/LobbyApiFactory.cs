@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using LobbyService.Domain.Dtos;
 using LobbyService.Domain.Entities;
+using LobbyService.Domain.Exceptions;
 using LobbyService.Repository.Interfaces;
 using LobbyService.Service.Interfaces;
 using Microsoft.AspNetCore.Hosting;
@@ -33,8 +34,13 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<ILobbyCacheRepository, InMemoryLobbyCacheRepository>();
             services.RemoveAll<IMusicServiceClient>();
             services.AddSingleton<IMusicServiceClient, FakeMusicServiceClient>();
+            services.RemoveAll<IGameServiceClient>();
+            services.AddSingleton<IGameServiceClient, FakeGameServiceClient>();
         });
     }
+
+    // The fake GameService fails whenever this user is one of the players.
+    public const int GameServiceFailsForUserId = 1999;
 
     public static string CreateToken(int userId, string userName, string signingKey = SigningKey)
     {
@@ -54,6 +60,14 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     {
         public Task<PlaylistDto?> GetPlaylistAsync(int playlistId, string accessToken, CancellationToken cancellationToken = default) =>
             Task.FromResult(playlistId == KnownPlaylistId ? new PlaylistDto(KnownPlaylistId, "Test playlist", 30) : null);
+    }
+
+    private class FakeGameServiceClient : IGameServiceClient
+    {
+        public Task<Guid> CreateGameAsync(CreateGameRequest request, string accessToken, CancellationToken cancellationToken = default) =>
+            request.Players.Any(p => p.UserId == GameServiceFailsForUserId) || string.IsNullOrEmpty(accessToken)
+                ? throw new GameServiceUnavailableException("GameService returned 503 when creating the game.")
+                : Task.FromResult(Guid.NewGuid());
     }
 
     // Mirrors the Redis repository: lobbies are stored as JSON and updates are compare-and-swap under a lock.
@@ -127,6 +141,33 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
                 {
                     _lobbies[after.Id] = Serialize(after);
                 }
+                return Task.FromResult(LobbyUpdateResult.Updated);
+            }
+        }
+
+        public Task<LobbyUpdateResult> TryUpdateAsync(Lobby before, Lobby after)
+        {
+            lock (_lock)
+            {
+                if (!IsUnchanged(before))
+                    return Task.FromResult(LobbyUpdateResult.Stale);
+                _lobbies[after.Id] = Serialize(after);
+                return Task.FromResult(LobbyUpdateResult.Updated);
+            }
+        }
+
+        public Task<LobbyUpdateResult> TryStartAsync(Lobby before, Lobby after)
+        {
+            lock (_lock)
+            {
+                if (!IsUnchanged(before))
+                    return Task.FromResult(LobbyUpdateResult.Stale);
+                _lobbies[after.Id] = Serialize(after);
+                _publicLobbies.TryRemove(after.Id, out _);
+                if (before.Code is not null)
+                    _codes.TryRemove(before.Code, out _);
+                foreach (var player in before.Players)
+                    _userLobbies.TryRemove(player.UserId, out _);
                 return Task.FromResult(LobbyUpdateResult.Updated);
             }
         }

@@ -12,10 +12,12 @@ namespace LobbyService.Repository.Repositories;
 //   user-lobby:{userId} -> lobby id
 //   lobbies:public      -> set of ids of public waiting lobbies (so listing needs no SCAN)
 // Waiting lobbies expire after 2 hours without changes; every write renews the TTL.
+// A started lobby expires 10 minutes after the start, and its code and user-lobby keys are deleted.
 // The set has no TTL; ids of expired lobbies are pruned when the list is read.
 public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRepository
 {
     public static readonly TimeSpan WaitingLobbyTtl = TimeSpan.FromHours(2);
+    public static readonly TimeSpan StartedLobbyTtl = TimeSpan.FromMinutes(10);
     public const string PublicLobbiesKey = "lobbies:public";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -109,6 +111,30 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
         {
             WriteLobby(tran, after);
         }
+
+        return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
+    }
+
+    public async Task<LobbyUpdateResult> TryUpdateAsync(Lobby before, Lobby after)
+    {
+        var tran = Db.CreateTransaction();
+        tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
+        WriteLobby(tran, after);
+
+        return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
+    }
+
+    public async Task<LobbyUpdateResult> TryStartAsync(Lobby before, Lobby after)
+    {
+        var tran = Db.CreateTransaction();
+        tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
+
+        _ = tran.StringSetAsync(LobbyKey(after.Id), Serialize(after), StartedLobbyTtl);
+        _ = tran.SetRemoveAsync(PublicLobbiesKey, after.Id.ToString());
+        if (before.Code is not null)
+            _ = tran.KeyDeleteAsync(CodeKey(before.Code));
+        foreach (var player in before.Players)
+            _ = tran.KeyDeleteAsync(UserLobbyKey(player.UserId));
 
         return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
     }

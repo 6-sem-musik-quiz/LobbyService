@@ -29,4 +29,16 @@ public interface ILobbyManager
     // player leaves, the lobby is deleted. Throws LobbyNotFoundException (unknown lobby or the user
     // is not in it) or LobbyConflictException (the game is running).
     Task LeaveAsync(Guid lobbyId, int userId);
+
+    // Sets the user's ready flag. Throws LobbyNotFoundException (unknown lobby or the user is not in it)
+    // or LobbyConflictException (the game has started).
+    Task<LobbyDto> SetReadyAsync(Guid lobbyId, int userId, bool ready);
+
+    // Host starts the game: GameService POST /api/games is called with the host's token, then the lobby
+    // becomes InGame, leaves lobbies:public and all players' user-lobby keys are deleted.
+    // Throws LobbyNotFoundException (404), LobbyForbiddenException (not host, 403),
+    // LobbyConflictException (started, fewer than 2 players or not all ready, 409) or
+    // GameServiceUnavailableException (502, the lobby stays Waiting).
+    Task<StartGameResponse> StartAsync(Guid lobbyId, int userId, string accessToken,
+        CancellationToken cancellationToken = default);
 }

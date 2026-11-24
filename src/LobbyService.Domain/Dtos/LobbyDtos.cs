@@ -13,6 +13,12 @@ public record CreateLobbyRequest(
 // Body of POST /api/lobbies/join-by-code. Matched case-insensitively.
 public record JoinByCodeRequest(string Code);
 
+// Body of POST /api/lobbies/{id}/ready.
+public record ReadyRequest(bool Ready);
+
+// Response of POST /api/lobbies/{id}/start.
+public record StartGameResponse(Guid GameId);
+
 public record LobbySettingsDto(
     int CategoryId,
     string CategoryName,
