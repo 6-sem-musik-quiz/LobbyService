@@ -301,6 +301,286 @@ public class LobbyManagerTests
         Assert.Null(result.Code);
         Assert.Equal(["user1", "user2"], result.Players.Select(p => p.UserName));
     }
+
+    // ---- Join ----
+
+    private void SetupJoinUpdated() =>
+        _repository.TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), Arg.Any<int>()).Returns(LobbyUpdateResult.Updated);
+
+    [Fact]
+    public async Task JoinAsync_PublicLobby_AddsPlayerLastAndNotReady()
+    {
+        var lobby = MakeLobby(0, userIds: [7, 8]);
+        lobby.Players[0].IsReady = true;
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupJoinUpdated();
+
+        var result = await _sut.JoinAsync(lobby.Id, UserId, UserName);
+
+        Assert.Equal([7, 8, UserId], result.Players.Select(p => p.UserId));
+        Assert.Equal(new LobbyPlayerDto(UserId, UserName, false), result.Players[^1]);
+        Assert.Equal(7, result.HostUserId);
+        await _repository.Received(1).TryJoinAsync(
+            Arg.Is<Lobby>(b => b.Players.Count == 2 && b.Players[0].IsReady),
+            Arg.Is<Lobby>(a => a.Players.Count == 3 && a.Players[2].UserId == UserId && !a.Players[2].IsReady),
+            UserId);
+    }
+
+    [Fact]
+    public async Task JoinAsync_UnknownLobby_ThrowsNotFound()
+    {
+        var id = Guid.NewGuid();
+        _repository.GetAsync(id).Returns((Lobby?)null);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.JoinAsync(id, UserId, UserName));
+    }
+
+    [Fact]
+    public async Task JoinAsync_PrivateLobbyById_ThrowsNotFound()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+        await _repository.DidNotReceiveWithAnyArgs().TryJoinAsync(default!, default!, default);
+    }
+
+    [Fact]
+    public async Task JoinAsync_FullLobby_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, players: 4, maxPlayers: 4);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+        Assert.Contains("full", ex.Message);
+        await _repository.DidNotReceiveWithAnyArgs().TryJoinAsync(default!, default!, default);
+    }
+
+    [Fact]
+    public async Task JoinAsync_GameStarted_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, status: LobbyStatus.InGame, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+        Assert.Contains("started", ex.Message);
+    }
+
+    [Fact]
+    public async Task JoinAsync_UserInAnotherLobby_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(Guid.NewGuid());
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+        Assert.Contains("another lobby", ex.Message);
+        await _repository.DidNotReceiveWithAnyArgs().TryJoinAsync(default!, default!, default);
+    }
+
+    [Fact]
+    public async Task JoinAsync_UserJoinsAnotherLobbyConcurrently_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.UserInOtherLobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+    }
+
+    [Fact]
+    public async Task JoinAsync_AlreadyInThisLobby_ReturnsLobbyUnchanged()
+    {
+        var lobby = MakeLobby(0, players: 4, maxPlayers: 4, userIds: [7, UserId, 8, 9]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(lobby.Id);
+
+        var result = await _sut.JoinAsync(lobby.Id, UserId, UserName);
+
+        Assert.Equal(4, result.Players.Count);
+        await _repository.DidNotReceiveWithAnyArgs().TryJoinAsync(default!, default!, default);
+    }
+
+    [Fact]
+    public async Task JoinAsync_LobbyChangedConcurrently_RetriesWithFreshData()
+    {
+        var first = MakeLobby(0, maxPlayers: 3, userIds: [7]);
+        var fresh = MakeLobby(0, maxPlayers: 3, userIds: [7, 8]);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        _repository.TryJoinAsync(Arg.Is<Lobby>(l => l.Players.Count == 1), Arg.Any<Lobby>(), UserId)
+            .Returns(LobbyUpdateResult.Stale);
+        _repository.TryJoinAsync(Arg.Is<Lobby>(l => l.Players.Count == 2), Arg.Any<Lobby>(), UserId)
+            .Returns(LobbyUpdateResult.Updated);
+
+        var result = await _sut.JoinAsync(first.Id, UserId, UserName);
+
+        Assert.Equal([7, 8, UserId], result.Players.Select(p => p.UserId));
+    }
+
+    [Fact]
+    public async Task JoinAsync_LastSeatTakenConcurrently_ThrowsFullOnRetry()
+    {
+        var first = MakeLobby(0, maxPlayers: 2, userIds: [7]);
+        var fresh = MakeLobby(0, maxPlayers: 2, userIds: [7, 8]);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        _repository.TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.Stale);
+
+        var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(first.Id, UserId, UserName));
+        Assert.Contains("full", ex.Message);
+        await _repository.Received(1).TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId);
+    }
+
+    [Fact]
+    public async Task JoinAsync_AlwaysStale_GivesUpAfterMaxAttempts()
+    {
+        var lobby = MakeLobby(0, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.Stale);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
+        await _repository.Received(LobbyManager.MaxUpdateAttempts)
+            .TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId);
+    }
+
+    [Theory]
+    [InlineData("PRIV23")]
+    [InlineData("priv23")]
+    [InlineData("  Priv23 ")]
+    public async Task JoinByCodeAsync_MatchesCaseInsensitively(string code)
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [7]);
+        _repository.GetLobbyIdByCodeAsync("PRIV23").Returns(lobby.Id);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupJoinUpdated();
+
+        var result = await _sut.JoinByCodeAsync(code, UserId, UserName);
+
+        Assert.Equal(lobby.Id, result.Id);
+        Assert.Equal("PRIV23", result.Code);
+        Assert.Equal([7, UserId], result.Players.Select(p => p.UserId));
+    }
+
+    [Theory]
+    [InlineData("NOPE23")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task JoinByCodeAsync_UnknownCode_ThrowsCodeNotFound(string code)
+    {
+        _repository.GetLobbyIdByCodeAsync(Arg.Any<string>()).Returns((Guid?)null);
+
+        await Assert.ThrowsAsync<LobbyCodeNotFoundException>(() => _sut.JoinByCodeAsync(code, UserId, UserName));
+    }
+
+    [Fact]
+    public async Task JoinByCodeAsync_CodeOfDeletedLobby_ThrowsCodeNotFound()
+    {
+        var id = Guid.NewGuid();
+        _repository.GetLobbyIdByCodeAsync("PRIV23").Returns(id);
+        _repository.GetAsync(id).Returns((Lobby?)null);
+
+        await Assert.ThrowsAsync<LobbyCodeNotFoundException>(() => _sut.JoinByCodeAsync("PRIV23", UserId, UserName));
+    }
+
+    [Fact]
+    public async Task JoinByCodeAsync_FullLobby_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, maxPlayers: 2, userIds: [7, 8]);
+        _repository.GetLobbyIdByCodeAsync("PRIV23").Returns(lobby.Id);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinByCodeAsync("PRIV23", UserId, UserName));
+    }
+
+    // ---- Leave ----
+
+    private void SetupLeaveUpdated() =>
+        _repository.TryLeaveAsync(Arg.Any<Lobby>(), Arg.Any<Lobby?>(), Arg.Any<int>()).Returns(LobbyUpdateResult.Updated);
+
+    [Fact]
+    public async Task LeaveAsync_NonHostLeaves_RemovesPlayerAndKeepsHost()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId, 8]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        await _repository.Received(1).TryLeaveAsync(lobby,
+            Arg.Is<Lobby?>(a => a!.HostUserId == 7 && a.Players.Select(p => p.UserId).SequenceEqual(new[] { 7, 8 })),
+            UserId);
+    }
+
+    [Fact]
+    public async Task LeaveAsync_HostLeaves_LongestStayingPlayerBecomesHost()
+    {
+        var lobby = MakeLobby(0, userIds: [UserId, 8, 9]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        await _repository.Received(1).TryLeaveAsync(lobby,
+            Arg.Is<Lobby?>(a => a!.HostUserId == 8 && a.Players.Select(p => p.UserId).SequenceEqual(new[] { 8, 9 })),
+            UserId);
+    }
+
+    [Fact]
+    public async Task LeaveAsync_LastPlayerLeaves_DeletesLobby()
+    {
+        var lobby = MakeLobby(0, isPrivate: true, userIds: [UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        SetupLeaveUpdated();
+
+        await _sut.LeaveAsync(lobby.Id, UserId);
+
+        await _repository.Received(1).TryLeaveAsync(lobby, null, UserId);
+    }
+
+    [Fact]
+    public async Task LeaveAsync_GameRunning_ThrowsConflict()
+    {
+        var lobby = MakeLobby(0, status: LobbyStatus.InGame, userIds: [7, UserId]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.LeaveAsync(lobby.Id, UserId));
+        await _repository.DidNotReceiveWithAnyArgs().TryLeaveAsync(default!, default, default);
+    }
+
+    [Fact]
+    public async Task LeaveAsync_UserNotInLobby_ThrowsNotFound()
+    {
+        var lobby = MakeLobby(0, userIds: [7, 8]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.LeaveAsync(lobby.Id, UserId));
+    }
+
+    [Fact]
+    public async Task LeaveAsync_UnknownLobby_ThrowsNotFound()
+    {
+        var id = Guid.NewGuid();
+        _repository.GetAsync(id).Returns((Lobby?)null);
+
+        await Assert.ThrowsAsync<LobbyNotFoundException>(() => _sut.LeaveAsync(id, UserId));
+    }
+
+    [Fact]
+    public async Task LeaveAsync_LobbyChangedConcurrently_Retries()
+    {
+        var first = MakeLobby(0, userIds: [UserId, 8]);
+        var fresh = MakeLobby(0, userIds: [UserId, 8, 9]);
+        fresh.Id = first.Id;
+        _repository.GetAsync(first.Id).Returns(first, fresh);
+        _repository.TryLeaveAsync(first, Arg.Any<Lobby?>(), UserId).Returns(LobbyUpdateResult.Stale);
+        _repository.TryLeaveAsync(fresh, Arg.Any<Lobby?>(), UserId).Returns(LobbyUpdateResult.Updated);
+
+        await _sut.LeaveAsync(first.Id, UserId);
+
+        await _repository.Received(1).TryLeaveAsync(fresh,
+            Arg.Is<Lobby?>(a => a!.HostUserId == 8 && a.Players.Count == 2), UserId);
+    }
 }
 
 public class LobbyCodeGeneratorTests

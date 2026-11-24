@@ -48,4 +48,53 @@ public class LobbyController(ILobbyManager lobbyManager) : ControllerBase
 
         return Ok(await lobbyManager.GetByIdAsync(id, userId));
     }
+
+    // Joins a public lobby. Private lobbies give 404 here; use join-by-code.
+    [HttpPost("{id:guid}/join")]
+    [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<LobbyDto>> Join(Guid id)
+    {
+        if (!TryGetUser(out var userId, out var userName))
+            return Unauthorized();
+
+        return Ok(await lobbyManager.JoinAsync(id, userId, userName));
+    }
+
+    // Joins a lobby by its code (case-insensitive).
+    [HttpPost("join-by-code")]
+    [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<LobbyDto>> JoinByCode(JoinByCodeRequest request)
+    {
+        if (!TryGetUser(out var userId, out var userName))
+            return Unauthorized();
+
+        return Ok(await lobbyManager.JoinByCodeAsync(request.Code, userId, userName));
+    }
+
+    [HttpPost("{id:guid}/leave")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Leave(Guid id)
+    {
+        if (!TryGetUser(out var userId, out _))
+            return Unauthorized();
+
+        await lobbyManager.LeaveAsync(id, userId);
+        return NoContent();
+    }
+
+    private bool TryGetUser(out int userId, out string userName)
+    {
+        userName = User.FindFirst("unique_name")?.Value ?? string.Empty;
+        return int.TryParse(User.FindFirst("sub")?.Value, out userId);
+    }
 }

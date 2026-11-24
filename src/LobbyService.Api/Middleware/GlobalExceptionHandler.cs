@@ -15,6 +15,7 @@ public class GlobalExceptionHandler(
             LobbyValidationException e => (StatusCodes.Status400BadRequest, "Invalid request.", e.Message),
             LobbyConflictException e => (StatusCodes.Status409Conflict, "Conflict.", e.Message),
             LobbyNotFoundException e => (StatusCodes.Status404NotFound, "Not found.", e.Message),
+            LobbyCodeNotFoundException e => (StatusCodes.Status404NotFound, "Not found.", e.Message),
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred.", null)
         };
 

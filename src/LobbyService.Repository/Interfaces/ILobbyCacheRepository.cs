@@ -9,10 +9,32 @@ public enum CreateLobbyResult
     UserAlreadyInLobby
 }
 
+public enum LobbyUpdateResult
+{
+    Updated,
+
+    // The lobby changed or disappeared after it was read. Re-read and try again.
+    Stale,
+
+    // The joining user already has a user-lobby key (another lobby).
+    UserInOtherLobby
+}
+
 // Reads and writes active lobbies in Redis.
 public interface ILobbyCacheRepository
 {
     Task<Lobby?> GetAsync(Guid lobbyId);
+
+    // Id of the lobby with the given (already normalised) code, or null.
+    Task<Guid?> GetLobbyIdByCodeAsync(string code);
+
+    // Compare-and-swap: replaces `before` with `after` and sets the user's user-lobby key, but only if
+    // the stored lobby still equals `before` and the user has no user-lobby key. Renews all TTLs.
+    Task<LobbyUpdateResult> TryJoinAsync(Lobby before, Lobby after, int userId);
+
+    // Compare-and-swap: removes the user's user-lobby key and replaces `before` with `after`.
+    // If `after` is null the lobby is deleted together with its code and its lobbies:public entry.
+    Task<LobbyUpdateResult> TryLeaveAsync(Lobby before, Lobby? after, int userId);
 
     // Id of the lobby the user is currently in, or null.
     Task<Guid?> GetLobbyIdForUserAsync(int userId);

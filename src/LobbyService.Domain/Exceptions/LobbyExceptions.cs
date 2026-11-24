@@ -18,3 +18,9 @@ public class LobbyNotFoundException(Guid lobbyId) : Exception($"Lobby {lobbyId} 
 {
     public Guid LobbyId { get; } = lobbyId;
 }
+
+// No lobby has the given join code. Mapped to 404.
+public class LobbyCodeNotFoundException(string code) : Exception($"No lobby has the code '{code}'.")
+{
+    public string Code { get; } = code;
+}
