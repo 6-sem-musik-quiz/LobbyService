@@ -107,6 +107,85 @@ public class LobbyControllerTests(LobbyApiFactory factory) : IClassFixture<Lobby
     }
 
     [Fact]
+    public async Task List_Returns200WithPublicLobbies_WithoutPrivate()
+    {
+        var visible = await (await ClientFor(1102, "host-new").PostAsJsonAsync("/api/lobbies", Body(rounds: 5)))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        var hidden = await (await ClientFor(1103).PostAsJsonAsync("/api/lobbies", Body(isPrivate: true)))
+            .Content.ReadFromJsonAsync<JsonElement>();
+
+        var response = await ClientFor(1104).GetAsync("/api/lobbies");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var rows = (await response.Content.ReadFromJsonAsync<JsonElement>()).EnumerateArray().ToList();
+        var ids = rows.Select(r => r.GetProperty("id").GetString()).ToList();
+        Assert.DoesNotContain(hidden.GetProperty("id").GetString(), ids);
+
+        var row = rows.Single(r => r.GetProperty("id").GetString() == visible.GetProperty("id").GetString());
+        Assert.Equal("host-new", row.GetProperty("hostUserName").GetString());
+        Assert.Equal("Test playlist", row.GetProperty("categoryName").GetString());
+        Assert.Equal(1, row.GetProperty("playerCount").GetInt32());
+        Assert.Equal(4, row.GetProperty("maxPlayers").GetInt32());
+        Assert.Equal(5, row.GetProperty("rounds").GetInt32());
+        Assert.Equal(30, row.GetProperty("answerTimeSeconds").GetInt32());
+    }
+
+    [Fact]
+    public async Task List_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().GetAsync("/api/lobbies");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_PublicLobby_Returns200WithPlayers()
+    {
+        var created = await (await ClientFor(1201, "bob").PostAsJsonAsync("/api/lobbies", Body()))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        var id = created.GetProperty("id").GetString();
+
+        var response = await ClientFor(1202).GetAsync($"/api/lobbies/{id}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(id, json.GetProperty("id").GetString());
+        var player = Assert.Single(json.GetProperty("players").EnumerateArray());
+        Assert.Equal("bob", player.GetProperty("userName").GetString());
+        Assert.False(player.GetProperty("isReady").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GetById_UnknownLobby_Returns404()
+    {
+        var response = await ClientFor(1203).GetAsync($"/api/lobbies/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<ProblemDetails>();
+        Assert.Equal(404, problem!.Status);
+    }
+
+    [Fact]
+    public async Task GetById_PrivateLobby_Returns404ForOutsiderAnd200ForPlayer()
+    {
+        var host = ClientFor(1204, "carol");
+        var created = await (await host.PostAsJsonAsync("/api/lobbies", Body(isPrivate: true)))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        var id = created.GetProperty("id").GetString();
+
+        Assert.Equal(HttpStatusCode.NotFound, (await ClientFor(1205).GetAsync($"/api/lobbies/{id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync($"/api/lobbies/{id}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().GetAsync($"/api/lobbies/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Health_IsAnonymous()
     {
         var response = await factory.CreateClient().GetAsync("/health");

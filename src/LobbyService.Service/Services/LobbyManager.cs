@@ -74,6 +74,27 @@ public class LobbyManager(
         throw new InvalidOperationException($"Could not generate a unique lobby code after {MaxCodeAttempts} attempts.");
     }
 
+    public async Task<IReadOnlyList<LobbySummaryDto>> GetOpenLobbiesAsync()
+    {
+        var lobbies = await repository.GetPublicWaitingAsync();
+
+        // The repository already filters, but the rule belongs here as well.
+        return lobbies
+            .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting)
+            .OrderByDescending(l => l.CreatedAt)
+            .Select(LobbySummaryDto.FromEntity)
+            .ToList();
+    }
+
+    public async Task<LobbyDto> GetByIdAsync(Guid lobbyId, int userId)
+    {
+        var lobby = await repository.GetAsync(lobbyId);
+        if (lobby is null || (lobby.IsPrivate && lobby.Players.All(p => p.UserId != userId)))
+            throw new LobbyNotFoundException(lobbyId);
+
+        return LobbyDto.FromEntity(lobby);
+    }
+
     private static void Validate(CreateLobbyRequest request)
     {
         if (!AllowedAnswerTimes.Contains(request.AnswerTimeSeconds))

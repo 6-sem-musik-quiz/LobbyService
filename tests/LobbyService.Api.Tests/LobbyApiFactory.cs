@@ -59,6 +59,7 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     {
         private readonly ConcurrentDictionary<Guid, Lobby> _lobbies = new();
         private readonly ConcurrentDictionary<int, Guid> _userLobbies = new();
+        private readonly ConcurrentDictionary<Guid, byte> _publicLobbies = new();
 
         public Task<Lobby?> GetAsync(Guid lobbyId) =>
             Task.FromResult(_lobbies.TryGetValue(lobbyId, out var lobby) ? lobby : null);
@@ -71,7 +72,25 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
             if (!_userLobbies.TryAdd(lobby.HostUserId, lobby.Id))
                 return Task.FromResult(CreateLobbyResult.UserAlreadyInLobby);
             _lobbies[lobby.Id] = lobby;
+            if (!lobby.IsPrivate && lobby.Status == LobbyStatus.Waiting)
+                _publicLobbies.TryAdd(lobby.Id, 0);
             return Task.FromResult(CreateLobbyResult.Created);
+        }
+
+        public Task<IReadOnlyList<Lobby>> GetPublicWaitingAsync()
+        {
+            IReadOnlyList<Lobby> result = _publicLobbies.Keys
+                .Select(id => _lobbies.TryGetValue(id, out var lobby) ? lobby : null)
+                .OfType<Lobby>()
+                .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting)
+                .ToList();
+            return Task.FromResult(result);
+        }
+
+        public Task RemoveFromPublicAsync(Guid lobbyId)
+        {
+            _publicLobbies.TryRemove(lobbyId, out _);
+            return Task.CompletedTask;
         }
     }
 }

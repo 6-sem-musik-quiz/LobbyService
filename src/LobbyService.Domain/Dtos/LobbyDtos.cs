@@ -43,3 +43,23 @@ public record LobbyDto(
         lobby.Players.Select(p => new LobbyPlayerDto(p.UserId, p.UserName, p.IsReady)).ToList(),
         lobby.Status);
 }
+
+// One row in GET /api/lobbies. The host is always Players[0].
+public record LobbySummaryDto(
+    Guid Id,
+    string HostUserName,
+    string CategoryName,
+    int PlayerCount,
+    int MaxPlayers,
+    int Rounds,
+    int AnswerTimeSeconds)
+{
+    public static LobbySummaryDto FromEntity(Lobby lobby) => new(
+        lobby.Id,
+        lobby.Players.FirstOrDefault()?.UserName ?? string.Empty,
+        lobby.Settings.CategoryName,
+        lobby.Players.Count,
+        lobby.Settings.MaxPlayers,
+        lobby.Settings.Rounds,
+        lobby.Settings.AnswerTimeSeconds);
+}

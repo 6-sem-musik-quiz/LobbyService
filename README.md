@@ -26,6 +26,8 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/lobbies` | Create a lobby. Body `{ categoryId, answerTimeSeconds, rounds, maxPlayers, isPrivate }`. `answerTimeSeconds` ∈ {15, 30, 45, 60}, `rounds` ∈ {5, 10, 15, 20}, `maxPlayers` 2–8. The playlist (`categoryId`) is fetched from MusicService and must have at least `rounds + 1` songs. Returns `201` with a `LobbyDto`, `400` for invalid values, an unknown playlist or too few songs, `401` without a valid token, and `409` if the user is already in a lobby. |
+| `GET` | `/api/lobbies` | Public lobbies waiting for players, newest first. Full lobbies are included (the frontend shows them as full). Returns `200` with `[{ id, hostUserName, categoryName, playerCount, maxPlayers, rounds, answerTimeSeconds }]` (empty array if none) and `401` without a valid token. |
+| `GET` | `/api/lobbies/{id}` | Full `LobbyDto` including players and ready status. Returns `200`, `401` without a valid token, and `404` if the lobby does not exist or is private and the caller is not one of its players. |
 
 ### Redis keys
 
@@ -34,8 +36,11 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | `lobby:{id}` | Lobby as JSON |
 | `lobbycode:{code}` | Lobby id (private lobbies only; 6 chars from `A-Z2-9` without `0/O/1/I`) |
 | `user-lobby:{userId}` | Id of the lobby the user is in |
+| `lobbies:public` | Set of ids of public lobbies with status `Waiting`, so `GET /api/lobbies` needs no `SCAN` |
 
 Waiting lobbies expire after 2 hours without changes. Every write renews the TTL.
+
+`lobbies:public` has no TTL. A lobby id is added when a public lobby is created and must be removed (`RemoveFromPublicAsync`) when the lobby starts, becomes private or is deleted. Ids whose lobby has expired or is no longer public and waiting are also pruned when the list is read.
 
 ## Configuration
 
