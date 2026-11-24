@@ -51,7 +51,9 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
             OnMessageReceived = context =>
             {
                 var accessToken = context.Request.Query["access_token"];
-                if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs/lobby"))
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken)
+                    && (path.StartsWithSegments(LobbyHub.Path) || path.StartsWithSegments(LobbyHub.EdgePath)))
                     context.Token = accessToken;
                 return Task.CompletedTask;
             }
@@ -85,8 +87,10 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-// Requires a JWT through the fallback policy.
-app.MapHub<LobbyHub>("/hubs/lobby");
+// Requires a JWT through the fallback policy. The edge forwards /api/lobbyservice/hubs/lobby as
+// /api/hubs/lobby (it turns /api/lobbyservice/{rest} into /api/{rest}), so the hub is mapped there too.
+app.MapHub<LobbyHub>(LobbyHub.Path);
+app.MapHub<LobbyHub>(LobbyHub.EdgePath);
 app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }).AllowAnonymous();
 
