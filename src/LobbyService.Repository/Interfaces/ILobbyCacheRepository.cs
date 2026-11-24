@@ -45,8 +45,13 @@ public interface ILobbyCacheRepository
     // new lobbies. Nothing is written if the stored lobby no longer equals `before`.
     Task<LobbyUpdateResult> TryStartAsync(Lobby before, Lobby after);
 
-    // Id of the lobby the user is currently in, or null.
+    // Id of the lobby the user is currently in, or null. The key can be stale (see ClearUserLobbyAsync).
     Task<Guid?> GetLobbyIdForUserAsync(int userId);
+
+    // Deletes the user's user-lobby key, but only while it still points at lobbyId, so a lobby the user
+    // has joined in the meantime is not touched. Used to clean up a key whose lobby is gone or no longer
+    // has the user as a player.
+    Task ClearUserLobbyAsync(int userId, Guid lobbyId);
 
     // Atomically stores the lobby, its private code (if any) and the host's user-lobby key.
     // Nothing is written if the code is already taken or the host is already in a lobby.

@@ -9,6 +9,10 @@ public interface ILobbyManager
     Task<LobbyDto> CreateAsync(CreateLobbyRequest request, int userId, string userName, string accessToken,
         CancellationToken cancellationToken = default);
 
+    // The waiting lobby the user is in, or null. A user-lobby key whose lobby is gone, has started or no
+    // longer lists the user is deleted here, so the user is free to create or join again.
+    Task<LobbyDto?> GetMyLobbyAsync(int userId);
+
     // Public lobbies waiting for players (full ones included), newest first.
     Task<IReadOnlyList<LobbySummaryDto>> GetOpenLobbiesAsync();
 

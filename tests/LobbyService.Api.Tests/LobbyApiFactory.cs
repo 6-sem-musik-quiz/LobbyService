@@ -71,7 +71,7 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     }
 
     // Mirrors the Redis repository: lobbies are stored as JSON and updates are compare-and-swap under a lock.
-    private class InMemoryLobbyCacheRepository : ILobbyCacheRepository
+    public class InMemoryLobbyCacheRepository : ILobbyCacheRepository
     {
         private readonly object _lock = new();
         private readonly ConcurrentDictionary<Guid, string> _lobbies = new();
@@ -87,6 +87,27 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
 
         public Task<Guid?> GetLobbyIdForUserAsync(int userId) =>
             Task.FromResult(_userLobbies.TryGetValue(userId, out var id) ? id : (Guid?)null);
+
+        public Task ClearUserLobbyAsync(int userId, Guid lobbyId)
+        {
+            lock (_lock)
+            {
+                if (_userLobbies.TryGetValue(userId, out var current) && current == lobbyId)
+                    _userLobbies.TryRemove(userId, out _);
+                return Task.CompletedTask;
+            }
+        }
+
+        // Test hook: makes a lobby disappear without touching the players' user-lobby keys,
+        // like a lobby key that expired or was lost while the user-lobby key survived.
+        public void LoseLobby(Guid lobbyId)
+        {
+            lock (_lock)
+            {
+                _lobbies.TryRemove(lobbyId, out _);
+                _publicLobbies.TryRemove(lobbyId, out _);
+            }
+        }
 
         public Task<Guid?> GetLobbyIdByCodeAsync(string code) =>
             Task.FromResult(_codes.TryGetValue(code, out var id) ? id : (Guid?)null);

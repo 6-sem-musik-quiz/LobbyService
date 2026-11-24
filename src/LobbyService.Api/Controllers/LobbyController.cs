@@ -32,6 +32,22 @@ public class LobbyController(ILobbyManager lobbyManager) : ControllerBase
     public async Task<ActionResult<IReadOnlyList<LobbySummaryDto>>> GetOpen() =>
         Ok(await lobbyManager.GetOpenLobbiesAsync());
 
+    // The waiting lobby the caller is in, so a player who left the page can find it again.
+    // 404 when the caller is in no lobby (a stale reference is cleared on the way).
+    [HttpGet("mine")]
+    [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<LobbyDto>> GetMine()
+    {
+        if (!TryGetUser(out var userId, out _))
+            return Unauthorized();
+
+        return await lobbyManager.GetMyLobbyAsync(userId) is { } lobby
+            ? Ok(lobby)
+            : Problem(statusCode: StatusCodes.Status404NotFound, title: "Not found.", detail: "You are not in a lobby.");
+    }
+
     // Private lobbies are only visible to their players (otherwise 404).
     [HttpGet("{id:guid}")]
     [ProducesResponseType<LobbyDto>(StatusCodes.Status200OK)]

@@ -188,7 +188,9 @@ public class LobbyManagerTests
     [Fact]
     public async Task CreateAsync_UserAlreadyInLobby_ThrowsConflict()
     {
-        _repository.GetLobbyIdForUserAsync(UserId).Returns(Guid.NewGuid());
+        var current = MakeLobby(0, userIds: [UserId]);
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(current.Id);
+        _repository.GetAsync(current.Id).Returns(current);
 
         await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.CreateAsync(ValidRequest(), UserId, UserName, Token));
         await _musicService.DidNotReceive().GetPlaylistAsync(Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
@@ -382,7 +384,9 @@ public class LobbyManagerTests
     {
         var lobby = MakeLobby(0, userIds: [7]);
         _repository.GetAsync(lobby.Id).Returns(lobby);
-        _repository.GetLobbyIdForUserAsync(UserId).Returns(Guid.NewGuid());
+        var other = MakeLobby(0, userIds: [8, UserId]);
+        _repository.GetAsync(other.Id).Returns(other);
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(other.Id);
 
         var ex = await Assert.ThrowsAsync<LobbyConflictException>(() => _sut.JoinAsync(lobby.Id, UserId, UserName));
         Assert.Contains("another lobby", ex.Message);
@@ -1013,6 +1017,82 @@ public class LobbyManagerTests
         var result = await _sut.SetReadyAsync(lobby.Id, UserId, true);
 
         Assert.True(result.Players[1].IsReady);
+    }
+
+    // A user-lobby key is only trusted when its lobby exists, is waiting and still lists the user.
+    // Otherwise it is stale: it is cleared and the user can create or join again.
+    public static TheoryData<string> StaleReasons => ["gone", "notAPlayer", "started"];
+
+    private Guid StaleUserLobby(string reason)
+    {
+        var lobby = reason switch
+        {
+            "notAPlayer" => MakeLobby(0, userIds: [7, 8]),
+            "started" => MakeLobby(0, status: LobbyStatus.InGame, userIds: [7, UserId]),
+            _ => null
+        };
+        var id = lobby?.Id ?? Guid.NewGuid();
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(id);
+        _repository.GetAsync(id).Returns(lobby);
+        return id;
+    }
+
+    [Theory]
+    [MemberData(nameof(StaleReasons))]
+    public async Task CreateAsync_StaleUserLobby_ClearsItAndCreates(string reason)
+    {
+        var staleId = StaleUserLobby(reason);
+
+        var result = await _sut.CreateAsync(ValidRequest(), UserId, UserName, Token);
+
+        Assert.Equal(UserId, result.HostUserId);
+        await _repository.Received(1).ClearUserLobbyAsync(UserId, staleId);
+        await _repository.Received(1).TryCreateAsync(Arg.Any<Lobby>());
+    }
+
+    [Theory]
+    [MemberData(nameof(StaleReasons))]
+    public async Task JoinAsync_StaleUserLobby_ClearsItAndJoins(string reason)
+    {
+        var staleId = StaleUserLobby(reason);
+        var lobby = MakeLobby(0, userIds: [7]);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+        _repository.TryJoinAsync(Arg.Any<Lobby>(), Arg.Any<Lobby>(), UserId).Returns(LobbyUpdateResult.Updated);
+
+        var result = await _sut.JoinAsync(lobby.Id, UserId, UserName);
+
+        Assert.Contains(result.Players, p => p.UserId == UserId);
+        await _repository.Received(1).ClearUserLobbyAsync(UserId, staleId);
+    }
+
+    [Fact]
+    public async Task GetMyLobbyAsync_ReturnsTheLobbyTheUserIsIn()
+    {
+        var lobby = MakeLobby(0, userIds: [7, UserId]);
+        _repository.GetLobbyIdForUserAsync(UserId).Returns(lobby.Id);
+        _repository.GetAsync(lobby.Id).Returns(lobby);
+
+        var result = await _sut.GetMyLobbyAsync(UserId);
+
+        Assert.Equal(lobby.Id, result?.Id);
+        await _repository.DidNotReceiveWithAnyArgs().ClearUserLobbyAsync(default, default);
+    }
+
+    [Fact]
+    public async Task GetMyLobbyAsync_NotInALobby_ReturnsNull()
+    {
+        Assert.Null(await _sut.GetMyLobbyAsync(UserId));
+        await _repository.DidNotReceiveWithAnyArgs().ClearUserLobbyAsync(default, default);
+    }
+
+    [Theory]
+    [MemberData(nameof(StaleReasons))]
+    public async Task GetMyLobbyAsync_StaleUserLobby_ClearsItAndReturnsNull(string reason)
+    {
+        var staleId = StaleUserLobby(reason);
+
+        Assert.Null(await _sut.GetMyLobbyAsync(UserId));
+        await _repository.Received(1).ClearUserLobbyAsync(UserId, staleId);
     }
 }
 
