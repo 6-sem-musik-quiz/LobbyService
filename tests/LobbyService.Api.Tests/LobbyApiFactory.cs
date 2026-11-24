@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using LobbyService.Domain.Dtos;
 using LobbyService.Domain.Entities;
 using LobbyService.Repository.Interfaces;
@@ -55,32 +56,88 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
             Task.FromResult(playlistId == KnownPlaylistId ? new PlaylistDto(KnownPlaylistId, "Test playlist", 30) : null);
     }
 
+    // Mirrors the Redis repository: lobbies are stored as JSON and updates are compare-and-swap under a lock.
     private class InMemoryLobbyCacheRepository : ILobbyCacheRepository
     {
-        private readonly ConcurrentDictionary<Guid, Lobby> _lobbies = new();
+        private readonly object _lock = new();
+        private readonly ConcurrentDictionary<Guid, string> _lobbies = new();
+        private readonly ConcurrentDictionary<string, Guid> _codes = new();
         private readonly ConcurrentDictionary<int, Guid> _userLobbies = new();
         private readonly ConcurrentDictionary<Guid, byte> _publicLobbies = new();
 
+        private static string Serialize(Lobby lobby) => JsonSerializer.Serialize(lobby);
+        private static Lobby Deserialize(string json) => JsonSerializer.Deserialize<Lobby>(json)!;
+
         public Task<Lobby?> GetAsync(Guid lobbyId) =>
-            Task.FromResult(_lobbies.TryGetValue(lobbyId, out var lobby) ? lobby : null);
+            Task.FromResult(_lobbies.TryGetValue(lobbyId, out var json) ? Deserialize(json) : null);
 
         public Task<Guid?> GetLobbyIdForUserAsync(int userId) =>
             Task.FromResult(_userLobbies.TryGetValue(userId, out var id) ? id : (Guid?)null);
 
+        public Task<Guid?> GetLobbyIdByCodeAsync(string code) =>
+            Task.FromResult(_codes.TryGetValue(code, out var id) ? id : (Guid?)null);
+
         public Task<CreateLobbyResult> TryCreateAsync(Lobby lobby)
         {
-            if (!_userLobbies.TryAdd(lobby.HostUserId, lobby.Id))
-                return Task.FromResult(CreateLobbyResult.UserAlreadyInLobby);
-            _lobbies[lobby.Id] = lobby;
-            if (!lobby.IsPrivate && lobby.Status == LobbyStatus.Waiting)
-                _publicLobbies.TryAdd(lobby.Id, 0);
-            return Task.FromResult(CreateLobbyResult.Created);
+            lock (_lock)
+            {
+                if (_userLobbies.ContainsKey(lobby.HostUserId))
+                    return Task.FromResult(CreateLobbyResult.UserAlreadyInLobby);
+                if (lobby.Code is not null && _codes.ContainsKey(lobby.Code))
+                    return Task.FromResult(CreateLobbyResult.CodeTaken);
+                _userLobbies[lobby.HostUserId] = lobby.Id;
+                if (lobby.Code is not null)
+                    _codes[lobby.Code] = lobby.Id;
+                _lobbies[lobby.Id] = Serialize(lobby);
+                if (!lobby.IsPrivate && lobby.Status == LobbyStatus.Waiting)
+                    _publicLobbies.TryAdd(lobby.Id, 0);
+                return Task.FromResult(CreateLobbyResult.Created);
+            }
         }
+
+        public Task<LobbyUpdateResult> TryJoinAsync(Lobby before, Lobby after, int userId)
+        {
+            lock (_lock)
+            {
+                if (!IsUnchanged(before))
+                    return Task.FromResult(LobbyUpdateResult.Stale);
+                if (_userLobbies.ContainsKey(userId))
+                    return Task.FromResult(LobbyUpdateResult.UserInOtherLobby);
+                _userLobbies[userId] = after.Id;
+                _lobbies[after.Id] = Serialize(after);
+                return Task.FromResult(LobbyUpdateResult.Updated);
+            }
+        }
+
+        public Task<LobbyUpdateResult> TryLeaveAsync(Lobby before, Lobby? after, int userId)
+        {
+            lock (_lock)
+            {
+                if (!IsUnchanged(before))
+                    return Task.FromResult(LobbyUpdateResult.Stale);
+                _userLobbies.TryRemove(userId, out _);
+                if (after is null)
+                {
+                    _lobbies.TryRemove(before.Id, out _);
+                    if (before.Code is not null)
+                        _codes.TryRemove(before.Code, out _);
+                    _publicLobbies.TryRemove(before.Id, out _);
+                }
+                else
+                {
+                    _lobbies[after.Id] = Serialize(after);
+                }
+                return Task.FromResult(LobbyUpdateResult.Updated);
+            }
+        }
+
+        private bool IsUnchanged(Lobby before) =>
+            _lobbies.TryGetValue(before.Id, out var json) && json == Serialize(before);
 
         public Task<IReadOnlyList<Lobby>> GetPublicWaitingAsync()
         {
             IReadOnlyList<Lobby> result = _publicLobbies.Keys
-                .Select(id => _lobbies.TryGetValue(id, out var lobby) ? lobby : null)
+                .Select(id => _lobbies.TryGetValue(id, out var json) ? Deserialize(json) : null)
                 .OfType<Lobby>()
                 .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting)
                 .ToList();

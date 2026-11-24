@@ -185,6 +185,193 @@ public class LobbyControllerTests(LobbyApiFactory factory) : IClassFixture<Lobby
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    private async Task<JsonElement> CreateLobby(HttpClient host, bool isPrivate = false, int maxPlayers = 4)
+    {
+        var response = await host.PostAsJsonAsync("/api/lobbies", new
+        {
+            categoryId = LobbyApiFactory.KnownPlaylistId,
+            answerTimeSeconds = 30,
+            rounds = 10,
+            maxPlayers,
+            isPrivate
+        });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        return await response.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    [Fact]
+    public async Task Join_PublicLobby_Returns200WithPlayerAddedLast()
+    {
+        var id = (await CreateLobby(ClientFor(1301, "host"))).GetProperty("id").GetString();
+
+        var response = await ClientFor(1302, "guest").PostAsync($"/api/lobbies/{id}/join", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var players = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("players")
+            .EnumerateArray().ToList();
+        Assert.Equal(["host", "guest"], players.Select(p => p.GetProperty("userName").GetString()));
+        Assert.False(players[1].GetProperty("isReady").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Join_Twice_Returns200WithoutDuplicate()
+    {
+        var id = (await CreateLobby(ClientFor(1311))).GetProperty("id").GetString();
+        var guest = ClientFor(1312);
+        await guest.PostAsync($"/api/lobbies/{id}/join", null);
+
+        var response = await guest.PostAsync($"/api/lobbies/{id}/join", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(2, json.GetProperty("players").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Join_UnknownLobby_Returns404()
+    {
+        var response = await ClientFor(1321).PostAsync($"/api/lobbies/{Guid.NewGuid()}/join", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_PrivateLobbyById_Returns404()
+    {
+        var id = (await CreateLobby(ClientFor(1322), isPrivate: true)).GetProperty("id").GetString();
+
+        var response = await ClientFor(1323).PostAsync($"/api/lobbies/{id}/join", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_FullLobby_Returns409()
+    {
+        var id = (await CreateLobby(ClientFor(1331), maxPlayers: 2)).GetProperty("id").GetString();
+        Assert.Equal(HttpStatusCode.OK, (await ClientFor(1332).PostAsync($"/api/lobbies/{id}/join", null)).StatusCode);
+
+        var response = await ClientFor(1333).PostAsync($"/api/lobbies/{id}/join", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_ConcurrentForLastSeat_OnlyOneSucceeds()
+    {
+        var id = (await CreateLobby(ClientFor(1341), maxPlayers: 2)).GetProperty("id").GetString();
+
+        var responses = await Task.WhenAll(
+            Enumerable.Range(1342, 6).Select(u => ClientFor(u).PostAsync($"/api/lobbies/{id}/join", null)));
+
+        Assert.Single(responses, r => r.StatusCode == HttpStatusCode.OK);
+        Assert.All(responses.Where(r => r.StatusCode != HttpStatusCode.OK),
+            r => Assert.Equal(HttpStatusCode.Conflict, r.StatusCode));
+    }
+
+    [Fact]
+    public async Task Join_UserInAnotherLobby_Returns409()
+    {
+        var other = ClientFor(1351);
+        await CreateLobby(other);
+        var id = (await CreateLobby(ClientFor(1352))).GetProperty("id").GetString();
+
+        var response = await other.PostAsync($"/api/lobbies/{id}/join", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().PostAsync($"/api/lobbies/{Guid.NewGuid()}/join", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task JoinByCode_LowercaseCode_Returns200()
+    {
+        var created = await CreateLobby(ClientFor(1361), isPrivate: true);
+        var code = created.GetProperty("code").GetString()!;
+
+        var response = await ClientFor(1362).PostAsJsonAsync("/api/lobbies/join-by-code", new { code = code.ToLowerInvariant() });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(created.GetProperty("id").GetString(), json.GetProperty("id").GetString());
+        Assert.Equal(2, json.GetProperty("players").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task JoinByCode_UnknownCode_Returns404()
+    {
+        var response = await ClientFor(1363).PostAsJsonAsync("/api/lobbies/join-by-code", new { code = "ZZZZZZ" });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task JoinByCode_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().PostAsJsonAsync("/api/lobbies/join-by-code", new { code = "ABCDEF" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Leave_HostLeaves_Returns204AndNextPlayerBecomesHost()
+    {
+        var host = ClientFor(1401);
+        var id = (await CreateLobby(host)).GetProperty("id").GetString();
+        var guest = ClientFor(1402);
+        await guest.PostAsync($"/api/lobbies/{id}/join", null);
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/leave", null);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var lobby = await (await guest.GetAsync($"/api/lobbies/{id}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1402, lobby.GetProperty("hostUserId").GetInt32());
+        Assert.Equal(1, lobby.GetProperty("players").GetArrayLength());
+
+        // The former host is free to create a new lobby.
+        await CreateLobby(host);
+    }
+
+    [Fact]
+    public async Task Leave_LastPlayer_Returns204AndDeletesLobbyAndCode()
+    {
+        var host = ClientFor(1411);
+        var created = await CreateLobby(host, isPrivate: true);
+        var id = created.GetProperty("id").GetString();
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/leave", null);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await host.GetAsync($"/api/lobbies/{id}")).StatusCode);
+        var byCode = await ClientFor(1412).PostAsJsonAsync("/api/lobbies/join-by-code",
+            new { code = created.GetProperty("code").GetString() });
+        Assert.Equal(HttpStatusCode.NotFound, byCode.StatusCode);
+    }
+
+    [Fact]
+    public async Task Leave_NotInLobby_Returns404()
+    {
+        var id = (await CreateLobby(ClientFor(1421))).GetProperty("id").GetString();
+
+        var response = await ClientFor(1422).PostAsync($"/api/lobbies/{id}/leave", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Leave_WithoutToken_Returns401()
+    {
+        var response = await factory.CreateClient().PostAsync($"/api/lobbies/{Guid.NewGuid()}/leave", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     [Fact]
     public async Task Health_IsAnonymous()
     {

@@ -67,6 +67,64 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis) : ILobbyCacheRep
             : throw new InvalidOperationException("Redis transaction for lobby creation was aborted.");
     }
 
+    public async Task<Guid?> GetLobbyIdByCodeAsync(string code)
+    {
+        var value = await Db.StringGetAsync(CodeKey(code));
+        return Guid.TryParse(value.ToString(), out var id) ? id : null;
+    }
+
+    // `before` is re-serialised with the same options it was stored with, so an unchanged lobby
+    // produces the same JSON. Any concurrent write makes the condition fail (optimistic locking).
+    public async Task<LobbyUpdateResult> TryJoinAsync(Lobby before, Lobby after, int userId)
+    {
+        var tran = Db.CreateTransaction();
+        var unchanged = tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
+        var userFree = tran.AddCondition(Condition.KeyNotExists(UserLobbyKey(userId)));
+
+        _ = tran.StringSetAsync(UserLobbyKey(userId), after.Id.ToString(), WaitingLobbyTtl);
+        WriteLobby(tran, after);
+
+        if (await tran.ExecuteAsync())
+            return LobbyUpdateResult.Updated;
+
+        return !unchanged.WasSatisfied ? LobbyUpdateResult.Stale
+            : !userFree.WasSatisfied ? LobbyUpdateResult.UserInOtherLobby
+            : throw new InvalidOperationException("Redis transaction for joining a lobby was aborted.");
+    }
+
+    public async Task<LobbyUpdateResult> TryLeaveAsync(Lobby before, Lobby? after, int userId)
+    {
+        var tran = Db.CreateTransaction();
+        tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
+
+        _ = tran.KeyDeleteAsync(UserLobbyKey(userId));
+        if (after is null)
+        {
+            _ = tran.KeyDeleteAsync(LobbyKey(before.Id));
+            if (before.Code is not null)
+                _ = tran.KeyDeleteAsync(CodeKey(before.Code));
+            _ = tran.SetRemoveAsync(PublicLobbiesKey, before.Id.ToString());
+        }
+        else
+        {
+            WriteLobby(tran, after);
+        }
+
+        return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
+    }
+
+    // Stores the lobby and renews the TTL of its code and of every player's user-lobby key.
+    private static void WriteLobby(ITransaction tran, Lobby lobby)
+    {
+        _ = tran.StringSetAsync(LobbyKey(lobby.Id), Serialize(lobby), WaitingLobbyTtl);
+        if (lobby.Code is not null)
+            _ = tran.KeyExpireAsync(CodeKey(lobby.Code), WaitingLobbyTtl);
+        foreach (var player in lobby.Players)
+            _ = tran.KeyExpireAsync(UserLobbyKey(player.UserId), WaitingLobbyTtl);
+    }
+
+    private static string Serialize(Lobby lobby) => JsonSerializer.Serialize(lobby, JsonOptions);
+
     public async Task<IReadOnlyList<Lobby>> GetPublicWaitingAsync()
     {
         var db = Db;

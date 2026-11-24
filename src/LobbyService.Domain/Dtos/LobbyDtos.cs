@@ -10,6 +10,9 @@ public record CreateLobbyRequest(
     int MaxPlayers,
     bool IsPrivate);
 
+// Body of POST /api/lobbies/join-by-code. Matched case-insensitively.
+public record JoinByCodeRequest(string Code);
+
 public record LobbySettingsDto(
     int CategoryId,
     string CategoryName,

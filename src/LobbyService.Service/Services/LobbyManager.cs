@@ -18,6 +18,7 @@ public class LobbyManager(
     public const int MinPlayers = 2;
     public const int MaxPlayers = 8;
     public const int MaxCodeAttempts = 10;
+    public const int MaxUpdateAttempts = 5;
 
     public async Task<LobbyDto> CreateAsync(CreateLobbyRequest request, int userId, string userName, string accessToken,
         CancellationToken cancellationToken = default)
@@ -94,6 +95,111 @@ public class LobbyManager(
 
         return LobbyDto.FromEntity(lobby);
     }
+
+    public Task<LobbyDto> JoinAsync(Guid lobbyId, int userId, string userName) =>
+        JoinWithRetryAsync(userId, userName, async () =>
+        {
+            // Private lobbies can only be joined with their code.
+            var lobby = await repository.GetAsync(lobbyId);
+            return lobby is null || lobby.IsPrivate ? throw new LobbyNotFoundException(lobbyId) : lobby;
+        });
+
+    public async Task<LobbyDto> JoinByCodeAsync(string code, int userId, string userName)
+    {
+        var normalized = (code ?? string.Empty).Trim().ToUpperInvariant();
+        if (normalized.Length == 0)
+            throw new LobbyCodeNotFoundException(normalized);
+
+        var lobbyId = await repository.GetLobbyIdByCodeAsync(normalized)
+                      ?? throw new LobbyCodeNotFoundException(normalized);
+
+        return await JoinWithRetryAsync(userId, userName, async () =>
+            await repository.GetAsync(lobbyId) ?? throw new LobbyCodeNotFoundException(normalized));
+    }
+
+    public async Task LeaveAsync(Guid lobbyId, int userId)
+    {
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await repository.GetAsync(lobbyId);
+            if (lobby is null || lobby.Players.All(p => p.UserId != userId))
+                throw new LobbyNotFoundException(lobbyId);
+            if (lobby.Status == LobbyStatus.InGame)
+                throw new LobbyConflictException("You cannot leave a lobby while the game is running.");
+
+            Lobby? after = null;
+            if (lobby.Players.Count > 1)
+            {
+                after = Clone(lobby);
+                after.Players.RemoveAll(p => p.UserId == userId);
+                // Players are kept in join order, so the first remaining player has been there longest.
+                if (after.HostUserId == userId)
+                    after.HostUserId = after.Players[0].UserId;
+            }
+
+            if (await repository.TryLeaveAsync(lobby, after, userId) == LobbyUpdateResult.Updated)
+                return;
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    // Reads the lobby, applies the join rules and writes it with compare-and-swap.
+    // If another request changed the lobby in between, the whole thing is retried on fresh data.
+    private async Task<LobbyDto> JoinWithRetryAsync(int userId, string userName, Func<Task<Lobby>> loadLobby)
+    {
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await loadLobby();
+
+            if (lobby.Players.Any(p => p.UserId == userId))
+                return LobbyDto.FromEntity(lobby);
+            if (lobby.Status == LobbyStatus.InGame)
+                throw new LobbyConflictException("The game has already started.");
+            if (lobby.Players.Count >= lobby.Settings.MaxPlayers)
+                throw new LobbyConflictException("The lobby is full.");
+            if (await repository.GetLobbyIdForUserAsync(userId) is not null)
+                throw new LobbyConflictException("You are already in another lobby.");
+
+            var after = Clone(lobby);
+            after.Players.Add(new LobbyPlayer { UserId = userId, UserName = userName, IsReady = false });
+
+            switch (await repository.TryJoinAsync(lobby, after, userId))
+            {
+                case LobbyUpdateResult.Updated:
+                    return LobbyDto.FromEntity(after);
+                case LobbyUpdateResult.UserInOtherLobby:
+                    throw new LobbyConflictException("You are already in another lobby.");
+                case LobbyUpdateResult.Stale:
+                    continue;
+            }
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    // Copy used as the new state, so the original can still be compared with what is stored.
+    private static Lobby Clone(Lobby lobby) => new()
+    {
+        Id = lobby.Id,
+        Code = lobby.Code,
+        HostUserId = lobby.HostUserId,
+        IsPrivate = lobby.IsPrivate,
+        Settings = new LobbySettings
+        {
+            CategoryId = lobby.Settings.CategoryId,
+            CategoryName = lobby.Settings.CategoryName,
+            AnswerTimeSeconds = lobby.Settings.AnswerTimeSeconds,
+            Rounds = lobby.Settings.Rounds,
+            MaxPlayers = lobby.Settings.MaxPlayers
+        },
+        Players = lobby.Players
+            .Select(p => new LobbyPlayer { UserId = p.UserId, UserName = p.UserName, IsReady = p.IsReady })
+            .ToList(),
+        Status = lobby.Status,
+        GameId = lobby.GameId,
+        CreatedAt = lobby.CreatedAt
+    };
 
     private static void Validate(CreateLobbyRequest request)
     {
