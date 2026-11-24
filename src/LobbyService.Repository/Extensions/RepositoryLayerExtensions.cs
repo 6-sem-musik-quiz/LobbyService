@@ -1,4 +1,5 @@
 using LobbyService.Repository.Interfaces;
+using LobbyService.Repository.Metrics;
 using LobbyService.Repository.Repositories;
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis;
@@ -19,6 +20,7 @@ public static class RepositoryLayerExtensions
             return ConnectionMultiplexer.Connect(options);
         });
 
+        services.AddSingleton<LobbyMetrics>();
         services.AddScoped<ILobbyCacheRepository, LobbyCacheRepository>();
         return services;
     }

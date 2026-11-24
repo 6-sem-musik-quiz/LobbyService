@@ -1,5 +1,6 @@
 using LobbyService.Service.Clients;
 using LobbyService.Service.Interfaces;
+using LobbyService.Service.Metrics;
 using LobbyService.Service.Services;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -13,6 +14,7 @@ public static class ServiceLayerExtensions
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<ILobbyCodeGenerator, LobbyCodeGenerator>();
         services.AddScoped<ILobbyManager, LobbyManager>();
+        services.AddHostedService<LobbyCountsRefresher>();
 
         services.AddHttpClient<IMusicServiceClient, MusicServiceClient>(client =>
             client.BaseAddress = ToBaseAddress(musicServiceBaseUrl, "http://localhost:5002"));

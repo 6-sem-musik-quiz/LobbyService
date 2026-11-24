@@ -6,6 +6,7 @@ using LobbyService.Domain.Dtos;
 using LobbyService.Domain.Entities;
 using LobbyService.Domain.Exceptions;
 using LobbyService.Repository.Interfaces;
+using LobbyService.Repository.Metrics;
 using LobbyService.Service.Interfaces;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -204,6 +205,14 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
                 .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting)
                 .ToList();
             return Task.FromResult(result);
+        }
+
+        public Task<LobbyCounts> CountByStatusAsync()
+        {
+            var lobbies = _lobbies.Values.Select(Deserialize).ToList();
+            return Task.FromResult(new LobbyCounts(
+                lobbies.Count(l => l.Status == LobbyStatus.Waiting),
+                lobbies.Count(l => l.Status == LobbyStatus.InGame)));
         }
 
         public Task RemoveFromPublicAsync(Guid lobbyId)
