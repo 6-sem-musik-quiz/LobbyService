@@ -56,7 +56,7 @@ Hub: `/hubs/lobby`, and `/api/hubs/lobby`, which is where the edge forwards the 
 | `lobbies:public` | Set of ids of public lobbies with status `Waiting`, so `GET /api/lobbies` needs no `SCAN` |
 | `lobbies:waiting`, `lobbies:ingame` | Sorted sets of lobby ids (score = expiry, unix seconds) used only for the `slopster_lobbies_active` metric. Expired ids are removed when the metric is read. |
 
-Waiting lobbies expire after 2 hours without changes. Every write renews the TTL. A started (`InGame`) lobby expires 10 minutes after the start.
+Waiting lobbies expire after 10 minutes without activity (SCRUM-160; `Lobby:IdleTimeoutMinutes`, env `Lobby__IdleTimeoutMinutes`). Every write (create, join, leave, ready, settings) renews the TTL. A started (`InGame`) lobby expires 10 minutes after the start.
 
 `lobbies:public` has no TTL. A lobby id is added when a public lobby is created and must be removed (`RemoveFromPublicAsync`) when the lobby starts, becomes private or is deleted. Ids whose lobby has expired or is no longer public and waiting are also pruned when the list is read.
 
@@ -83,7 +83,7 @@ Metrics are exported with OpenTelemetry over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`
 | `slopster_lobby_cache_lookups_total` | Counter | `result` = `hit` \| `miss` | Lookups in `LobbyCacheRepository` (lobby by id, lobby id by code, lobby id by user). |
 | `http_server_request_duration_seconds` | Histogram | `http_route`, `http_response_status_code`, ... | Response times per endpoint, from ASP.NET Core's built-in `http.server.request.duration` (instrumentation is enabled). |
 
-Lobbies that were already in Redis when the sorted sets were introduced are not counted; they expire within 2 hours.
+Lobbies that were already in Redis when the sorted sets were introduced are not counted; they expire within the idle timeout.
 
 Example PromQL for Grafana:
 
