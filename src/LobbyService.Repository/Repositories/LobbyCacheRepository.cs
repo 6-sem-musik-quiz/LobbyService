@@ -14,12 +14,14 @@ namespace LobbyService.Repository.Repositories;
 //   lobbies:public      -> set of ids of public waiting lobbies (so listing needs no SCAN)
 //   lobbies:waiting     -> sorted set of waiting lobby ids, score = expiry (unix seconds); for metrics only
 //   lobbies:ingame      -> same for started lobbies; counted until their key expires
-// Waiting lobbies expire after 2 hours without changes; every write renews the TTL.
+// SCRUM-160: waiting lobbies expire after IdleTimeout (default 10 minutes, Lobby:IdleTimeoutMinutes)
+// without activity; every write (create, join, leave, ready, settings) renews the TTL.
 // A started lobby expires 10 minutes after the start, and its code and user-lobby keys are deleted.
 // The set has no TTL; ids of expired lobbies are pruned when the list is read.
-public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics metrics) : ILobbyCacheRepository
+public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics metrics, LobbyCacheSettings? settings = null)
+    : ILobbyCacheRepository
 {
-    public static readonly TimeSpan WaitingLobbyTtl = TimeSpan.FromHours(2);
+    private readonly TimeSpan WaitingLobbyTtl = (settings ?? LobbyCacheSettings.Default).IdleTimeout;
     public static readonly TimeSpan StartedLobbyTtl = TimeSpan.FromMinutes(10);
     public const string PublicLobbiesKey = "lobbies:public";
     public const string WaitingLobbiesKey = "lobbies:waiting";
@@ -160,7 +162,7 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics met
     }
 
     // Stores the lobby and renews the TTL of its code and of every player's user-lobby key.
-    private static void WriteLobby(ITransaction tran, Lobby lobby)
+    private void WriteLobby(ITransaction tran, Lobby lobby)
     {
         _ = tran.StringSetAsync(LobbyKey(lobby.Id), Serialize(lobby), WaitingLobbyTtl);
         _ = tran.SortedSetAddAsync(WaitingLobbiesKey, lobby.Id.ToString(), ExpiresAt(WaitingLobbyTtl));

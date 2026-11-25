@@ -70,7 +70,8 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddSignalR()
     .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
-builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("Redis"));
+builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("Redis"),
+    builder.Configuration.GetValue<int?>("Lobby:IdleTimeoutMinutes")); // env Lobby__IdleTimeoutMinutes, default 10
 builder.Services.AddServiceLayer(
     builder.Configuration["MusicService:BaseUrl"],
     builder.Configuration["Services:GameService"]); // env Services__GameService
