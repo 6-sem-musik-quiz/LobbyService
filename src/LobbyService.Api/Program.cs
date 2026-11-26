@@ -12,7 +12,10 @@ using Microsoft.AspNetCore.Http.Connections;
 using StackExchange.Redis;
 using LobbyService.Repository.Metrics;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -88,13 +91,26 @@ builder.Services.AddServiceLayer(
 // SCRUM-172: GameFinished from RabbitMQ reopens the lobby ("Spil igen"). Env RabbitMQ__Host etc.
 builder.Services.AddGameFinishedConsumer(builder.Configuration);
 
-// Metrics over OTLP. The collector address comes from OTEL_EXPORTER_OTLP_ENDPOINT (default
-// http://localhost:4317) and the service name from OTEL_SERVICE_NAME.
+// SCRUM-118/173: traces, metrics and logs over OTLP. The collector address comes from
+// OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4317) and the service name from OTEL_SERVICE_NAME.
+// Starting a game calls GameService over HTTP, which carries the trace on: the game's whole trace starts
+// here. GameFinished comes back over RabbitMQ in that trace. Logs carry the trace id.
 builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation(o => o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"))
+        .AddSource("Microsoft.AspNetCore.SignalR.Server") // one span per lobby hub call
+        .AddSource("System.Net.Http")                     // GameService (start a game) and MusicService
+        .AddSource("RabbitMQ.Client.Subscriber"))         // GameFinished, in the game's trace
     .WithMetrics(metrics => metrics
         .AddAspNetCoreInstrumentation() // http.server.request.duration
-        .AddMeter(LobbyMetrics.MeterName)
-        .AddOtlpExporter());
+        .AddMeter("System.Net.Http", "System.Runtime", "Microsoft.AspNetCore.SignalR.Server")
+        .AddMeter(LobbyMetrics.MeterName))
+    .WithLogging(logging => { }, options =>
+    {
+        options.IncludeFormattedMessage = true;
+        options.IncludeScopes = true;
+    })
+    .UseOtlpExporter();
 
 var app = builder.Build();
 
