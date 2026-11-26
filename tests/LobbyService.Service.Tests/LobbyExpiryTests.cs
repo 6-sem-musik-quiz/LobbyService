@@ -110,16 +110,45 @@ public class LobbyExpiryTests
         Assert.All(Ttls().Values, ttl => Assert.Equal(TimeSpan.FromMinutes(3), ttl));
     }
 
+    // SCRUM-172: a started lobby must outlive the longest game, also when the idle timeout is short,
+    // and keeps its code (with the same TTL) for the reopened lobby.
     [Fact]
-    public async Task AStartedLobby_KeepsItsOwnTenMinutesAfterTheStart()
+    public async Task AStartedLobby_LivesAsLongAsTheGameCanTake_AndKeepsItsCode()
     {
-        var before = PrivateLobby(1);
-        var after = PrivateLobby(1);
+        var before = PrivateLobby(1, 2);
+        before.Settings = new LobbySettings { Rounds = 20, AnswerTimeSeconds = 60 };
+        var after = PrivateLobby(1, 2);
         after.Id = before.Id;
+        after.Settings = before.Settings;
         after.Status = LobbyStatus.InGame;
 
         await Repository(LobbyCacheSettings.FromMinutes(3)).TryStartAsync(before, after);
 
-        Assert.Equal(LobbyCacheRepository.StartedLobbyTtl, Ttls()[LobbyCacheRepository.LobbyKey(before.Id)]);
+        // 20 rounds x (60 s + 30 s) + 10 minutes = 40 minutes.
+        var forty = TimeSpan.FromMinutes(40);
+        Assert.Equal(forty, LobbyCacheRepository.StartedLobbyTtlFor(after.Settings));
+        Assert.Equal(forty, Ttls()[LobbyCacheRepository.LobbyKey(before.Id)]);
+        Assert.Equal(forty, Ttls()[LobbyCacheRepository.CodeKey("ABCDE")]);
+        _ = _tran.DidNotReceive().KeyDeleteAsync(LobbyCacheRepository.CodeKey("ABCDE"), Arg.Any<CommandFlags>());
+    }
+
+    [Fact]
+    public async Task AReopenedLobby_GetsTheIdleTimeoutAgain()
+    {
+        var before = PrivateLobby(1, 2);
+        before.Status = LobbyStatus.InGame;
+        var after = PrivateLobby(1, 2);
+        after.Id = before.Id;
+        after.PendingReturn = after.Players;
+        after.Players = [];
+
+        await Repository().TryReopenAsync(before, after);
+
+        var ten = TimeSpan.FromMinutes(10);
+        Assert.Equal(new Dictionary<string, TimeSpan>
+        {
+            [LobbyCacheRepository.LobbyKey(before.Id)] = ten,
+            [LobbyCacheRepository.CodeKey("ABCDE")] = ten
+        }, Ttls());
     }
 }

@@ -41,10 +41,16 @@ public interface ILobbyCacheRepository
     // still equals `before`. Renews all TTLs.
     Task<LobbyUpdateResult> TryUpdateAsync(Lobby before, Lobby after);
 
-    // Compare-and-swap for a started game: stores `after` (status InGame) with StartedLobbyTtl, removes it
-    // from lobbies:public, deletes its code and every player's user-lobby key, so the players can join
-    // new lobbies. Nothing is written if the stored lobby no longer equals `before`.
+    // Compare-and-swap for a started game: stores `after` (status InGame) for as long as the game can take
+    // (StartedLobbyTtlFor), removes it from lobbies:public and deletes every player's user-lobby key, so the
+    // players can join new lobbies. The code is kept for the reopened lobby (SCRUM-172).
+    // Nothing is written if the stored lobby no longer equals `before`.
     Task<LobbyUpdateResult> TryStartAsync(Lobby before, Lobby after);
+
+    // SCRUM-172, compare-and-swap after GameFinished: stores `after` (Waiting, no players, the old players in
+    // PendingReturn) with the idle TTL and renews the code's TTL. Nothing is written if the stored lobby no
+    // longer equals `before`.
+    Task<LobbyUpdateResult> TryReopenAsync(Lobby before, Lobby after);
 
     // Id of the lobby the user is currently in, or null. The key can be stale (see ClearUserLobbyAsync).
     Task<Guid?> GetLobbyIdForUserAsync(int userId);

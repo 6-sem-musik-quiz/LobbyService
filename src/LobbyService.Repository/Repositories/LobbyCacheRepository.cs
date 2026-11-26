@@ -16,13 +16,23 @@ namespace LobbyService.Repository.Repositories;
 //   lobbies:ingame      -> same for started lobbies; counted until their key expires
 // SCRUM-160: waiting lobbies expire after IdleTimeout (default 10 minutes, Lobby:IdleTimeoutMinutes)
 // without activity; every write (create, join, leave, ready, settings) renews the TTL.
-// A started lobby expires 10 minutes after the start, and its code and user-lobby keys are deleted.
+// A started lobby lives as long as its game can take plus a margin (StartedLobbyTtlFor), so it never
+// expires while the game runs (SCRUM-172). Its user-lobby keys are deleted at the start; its code is
+// kept (joining a started lobby gives 409), so the reopened lobby has the same code.
+// When GameService's GameFinished arrives the lobby reopens (TryReopenAsync) and gets the idle TTL again.
 // The set has no TTL; ids of expired lobbies are pruned when the list is read.
 public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics metrics, LobbyCacheSettings? settings = null)
     : ILobbyCacheRepository
 {
     private readonly TimeSpan WaitingLobbyTtl = (settings ?? LobbyCacheSettings.Default).IdleTimeout;
-    public static readonly TimeSpan StartedLobbyTtl = TimeSpan.FromMinutes(10);
+    // Margin per round for the reveal and the pause between rounds, and for the whole game on top.
+    public static readonly TimeSpan PerRoundMargin = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan StartedLobbyMargin = TimeSpan.FromMinutes(10);
+
+    // How long a started lobby is kept: every round's answer time plus margins, e.g. 20 rounds of 60 s
+    // give 40 minutes. If GameFinished never arrives (RabbitMQ down), the lobby expires after this.
+    public static TimeSpan StartedLobbyTtlFor(LobbySettings settings) =>
+        settings.Rounds * (TimeSpan.FromSeconds(settings.AnswerTimeSeconds) + PerRoundMargin) + StartedLobbyMargin;
     public const string PublicLobbiesKey = "lobbies:public";
     public const string WaitingLobbiesKey = "lobbies:waiting";
     public const string InGameLobbiesKey = "lobbies:ingame";
@@ -149,14 +159,29 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics met
         var tran = Db.CreateTransaction();
         tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
 
-        _ = tran.StringSetAsync(LobbyKey(after.Id), Serialize(after), StartedLobbyTtl);
+        var ttl = StartedLobbyTtlFor(after.Settings);
+        _ = tran.StringSetAsync(LobbyKey(after.Id), Serialize(after), ttl);
         _ = tran.SetRemoveAsync(PublicLobbiesKey, after.Id.ToString());
         _ = tran.SortedSetRemoveAsync(WaitingLobbiesKey, after.Id.ToString());
-        _ = tran.SortedSetAddAsync(InGameLobbiesKey, after.Id.ToString(), ExpiresAt(StartedLobbyTtl));
+        _ = tran.SortedSetAddAsync(InGameLobbiesKey, after.Id.ToString(), ExpiresAt(ttl));
+        // SCRUM-172: the code is kept for the reopened lobby; it lives as long as the lobby.
         if (before.Code is not null)
-            _ = tran.KeyDeleteAsync(CodeKey(before.Code));
+            _ = tran.KeyExpireAsync(CodeKey(before.Code), ttl);
         foreach (var player in before.Players)
             _ = tran.KeyDeleteAsync(UserLobbyKey(player.UserId));
+
+        return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
+    }
+
+    // SCRUM-172: the game is over. `after` is Waiting with no players (they are in PendingReturn), so no
+    // user-lobby keys are written; the lobby and its code get the idle TTL again. It enters lobbies:public
+    // again when the first player is back (WriteLobby), so the list never shows an empty lobby.
+    public async Task<LobbyUpdateResult> TryReopenAsync(Lobby before, Lobby after)
+    {
+        var tran = Db.CreateTransaction();
+        tran.AddCondition(Condition.StringEqual(LobbyKey(before.Id), Serialize(before)));
+        _ = tran.SortedSetRemoveAsync(InGameLobbiesKey, after.Id.ToString());
+        WriteLobby(tran, after);
 
         return await tran.ExecuteAsync() ? LobbyUpdateResult.Updated : LobbyUpdateResult.Stale;
     }
@@ -170,6 +195,9 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics met
             _ = tran.KeyExpireAsync(CodeKey(lobby.Code), WaitingLobbyTtl);
         foreach (var player in lobby.Players)
             _ = tran.KeyExpireAsync(UserLobbyKey(player.UserId), WaitingLobbyTtl);
+        // A reopened lobby (SCRUM-172) is listed again once someone is back. Adding twice is harmless.
+        if (IsPublicWaiting(lobby))
+            _ = tran.SetAddAsync(PublicLobbiesKey, lobby.Id.ToString());
     }
 
     private static double ExpiresAt(TimeSpan ttl) => DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds();
@@ -221,5 +249,7 @@ public class LobbyCacheRepository(IConnectionMultiplexer redis, LobbyMetrics met
     public Task RemoveFromPublicAsync(Guid lobbyId) =>
         Db.SetRemoveAsync(PublicLobbiesKey, lobbyId.ToString());
 
-    private static bool IsPublicWaiting(Lobby lobby) => !lobby.IsPrivate && lobby.Status == LobbyStatus.Waiting;
+    // A reopened lobby nobody has come back to yet (SCRUM-172) is not listed.
+    private static bool IsPublicWaiting(Lobby lobby) =>
+        !lobby.IsPrivate && lobby.Status == LobbyStatus.Waiting && lobby.Players.Count > 0;
 }

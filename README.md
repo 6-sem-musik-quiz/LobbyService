@@ -30,7 +30,8 @@ All endpoints require a JWT from UserService (`Authorization: Bearer <token>`). 
 | `GET` | `/api/lobbies/mine` | The waiting lobby the caller is in, so a player who left the page can find it again. Returns `200` with a `LobbyDto`, `401` without a valid token, and `404` if the caller is in no lobby. A `user-lobby` key whose lobby is gone, has started or no longer lists the caller is deleted (also when creating or joining), so a stale reference never blocks the player. |
 | `GET` | `/api/lobbies/{id}` | Full `LobbyDto` including players and ready status. Returns `200`, `401` without a valid token, and `404` if the lobby does not exist or is private and the caller is not one of its players. |
 | `POST` | `/api/lobbies/{id}/ready` | Body `{ ready: bool }`. Sets the caller's ready flag. Returns `200` with the `LobbyDto`, `404` if the lobby does not exist or the caller is not in it, and `409` if the game has started. |
-| `POST` | `/api/lobbies/{id}/start` | Host only. Calls GameService `POST /api/games` with `{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }` and the host's token. Returns `200` with `{ gameId }`, `403` if the caller is not host, `404` if the caller is not in the lobby, `409` with fewer than 2 players, not everyone ready or the game already started, and `502` if GameService fails (the lobby stays `Waiting`). On success the lobby becomes `InGame` with `gameId`, leaves `lobbies:public`, its code and every player's `user-lobby` key are deleted (so they can join new lobbies), and it expires 10 minutes later. |
+| `POST` | `/api/lobbies/{id}/start` | Host only. Calls GameService `POST /api/games` with `{ lobbyId, categoryId, categoryName, rounds, answerTimeSeconds, players: [{ userId, userName }] }` and the host's token. Returns `200` with `{ gameId }`, `403` if the caller is not host, `404` if the caller is not in the lobby, `409` with fewer than 2 players, not everyone ready or the game already started, and `502` if GameService fails (the lobby stays `Waiting`). On success the lobby becomes `InGame` with `gameId`, leaves `lobbies:public` and every player's `user-lobby` key is deleted (so they can join new lobbies). The code is kept for "Spil igen" (joining a started lobby gives `409`). The lobby lives as long as the game can take (see below) and reopens when the game has finished. |
+| `POST` | `/api/lobbies/{id}/play-again` | SCRUM-172, "Spil igen" from the end screen. Puts the caller back into the reopened lobby (same id, code and settings), not ready. Returns `200` with the `LobbyDto` (also when the caller is already back), `404` if the lobby does not exist or the caller did not play its last game, and `409` while the game has not finished yet (GameFinished not received; the frontend retries), when the lobby is full or the caller is in another lobby. |
 
 ### Live updates (SignalR)
 
@@ -75,9 +76,33 @@ docker stop lobby-test-redis
 | `lobbies:public` | Set of ids of public lobbies with status `Waiting`, so `GET /api/lobbies` needs no `SCAN` |
 | `lobbies:waiting`, `lobbies:ingame` | Sorted sets of lobby ids (score = expiry, unix seconds) used only for the `slopster_lobbies_active` metric. Expired ids are removed when the metric is read. |
 
-Waiting lobbies expire after 10 minutes without activity (SCRUM-160; `Lobby:IdleTimeoutMinutes`, env `Lobby__IdleTimeoutMinutes`). Every write (create, join, leave, ready, settings) renews the TTL. A started (`InGame`) lobby expires 10 minutes after the start.
+Waiting lobbies expire after 10 minutes without activity (SCRUM-160; `Lobby:IdleTimeoutMinutes`, env `Lobby__IdleTimeoutMinutes`). Every write (create, join, leave, ready, settings) renews the TTL. A started (`InGame`) lobby, and its code, live as long as the game can take: `rounds × (answerTimeSeconds + 30 s) + 10 min` (20 rounds of 60 s give 40 minutes), so a lobby never expires during a game (SCRUM-172). If GameFinished never arrives, the lobby expires after that.
 
 `lobbies:public` has no TTL. A lobby id is added when a public lobby is created and must be removed (`RemoveFromPublicAsync`) when the lobby starts, becomes private or is deleted. Ids whose lobby has expired or is no longer public and waiting are also pruned when the list is read.
+
+### "Spil igen" (SCRUM-172)
+
+When a game is over, GameService publishes `GameFinished` on RabbitMQ (topic exchange `game-events`, routing key `game.finished.v1`, contract `gameservice.game-finished` 1.1 in Platform). Since v1.1 it has the `lobbyId`. LobbyService consumes it from its own durable queue `lobbyservice.game-finished` (`GameFinishedConsumer`), next to StatisticService's queue on the same exchange, so both services get every message. All LobbyService pods share the queue, so one pod handles each message.
+
+```
+GameService ──GameFinished──▶ game-events ──▶ statisticservice.game-finished ──▶ StatisticService (saves the result)
+                                          └─▶ lobbyservice.game-finished    ──▶ LobbyService (reopens the lobby)
+```
+
+1. **GameFinished** for an `InGame` lobby whose `gameId` matches: the lobby becomes `Waiting` with **no players**; the game's players move to `pendingReturn` (stored in `lobby:{id}`, not in the API). Its TTL is the idle timeout again. A repeated or old message (the lobby is not in that game any more) changes nothing, so redelivery is harmless. A message without `lobbyId` (an older GameService) is acked and ignored.
+2. **"Spil igen"** (`POST .../play-again`) moves a player from `pendingReturn` back into the lobby, not ready, and sets their `user-lobby` key. Players who press "Forlad" or close the page never come back, so they are simply not in the new lobby. If the old host is not back, the first player back becomes host.
+3. Others can **join** the reopened lobby as usual (code, or the public list once someone is back) while there is room. Players who are still pending do not hold a seat.
+4. The host **starts** a new game as usual; GameService gives it a new `gameId`. The old game's result was already sent to StatisticService.
+
+The end screen may call `play-again` before the message has been handled (usually well under a second). Then it gets `409` and tries again for a few seconds. If RabbitMQ is down, the consumer reconnects every `RabbitMQ:ReconnectDelaySeconds`; the message waits in the durable queue, and the lobby reopens when it is handled.
+
+**Tests.** `PlayAgainTests` covers game over → lobby reopened → players back → new game started through the API, with the message handed to `GameFinishedHandler` as the consumer does. `RabbitMqPlayAgainTests` does the same through a real broker and is skipped unless `LOBBY_TEST_RABBITMQ` is set:
+
+```bash
+docker run -d --rm -p 5673:5672 --name lobby-test-rabbit rabbitmq:4-alpine
+LOBBY_TEST_RABBITMQ=localhost:5673 dotnet test -c Release --filter RabbitMqPlayAgainTests
+docker stop lobby-test-rabbit
+```
 
 ## Configuration
 
@@ -91,6 +116,10 @@ Waiting lobbies expire after 10 minutes without activity (SCRUM-160; `Lobby:Idle
 | `Jwt:Audience` | `slopster` | Expected token audience |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector that receives the metrics (standard OpenTelemetry variable) |
 | `OTEL_SERVICE_NAME` | *(assembly name)* | Service name on the metrics (standard OpenTelemetry variable) |
+| `RabbitMQ:Enabled` | `true` (`false` in Development) | Consume GameFinished (SCRUM-172). Off locally and in the tests |
+| `RabbitMQ:Host`, `RabbitMQ:Port` | `localhost`, `5672` | Broker (env `RabbitMQ__Host`); in the cluster from `lobbyservice-secrets` |
+| `RabbitMQ:Username`, `RabbitMQ:Password` | `guest` | From OpenBao `kv/quiz/rabbitmq` via ExternalSecret in the cluster |
+| `RabbitMQ:QueueName` | `lobbyservice.game-finished` | LobbyService's own durable queue, bound to `game-events` / `game.finished.v1` |
 
 ## Metrics
 
@@ -98,7 +127,7 @@ Metrics are exported with OpenTelemetry over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`
 
 | Metric (Prometheus name) | Type | Attributes | Meaning |
 |---|---|---|---|
-| `slopster_lobbies_active` | ObservableGauge | `status` = `waiting` \| `in_game` | Number of lobbies. Refreshed from Redis every 20 s; nothing is reported while Redis is unreachable. A started lobby counts as `in_game` until its key expires (10 min). |
+| `slopster_lobbies_active` | ObservableGauge | `status` = `waiting` \| `in_game` | Number of lobbies. Refreshed from Redis every 20 s; nothing is reported while Redis is unreachable. A started lobby counts as `in_game` until GameFinished reopens it, or until its key expires. |
 | `slopster_lobby_cache_lookups_total` | Counter | `result` = `hit` \| `miss` | Lookups in `LobbyCacheRepository` (lobby by id, lobby id by code, lobby id by user). |
 | `http_server_request_duration_seconds` | Histogram | `http_route`, `http_response_status_code`, ... | Response times per endpoint, from ASP.NET Core's built-in `http.server.request.duration` (instrumentation is enabled). |
 

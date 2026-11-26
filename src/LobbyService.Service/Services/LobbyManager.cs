@@ -249,6 +249,91 @@ public class LobbyManager(
         throw new LobbyConflictException("The lobby is busy. Please try again.");
     }
 
+    // SCRUM-172: GameFinished for this lobby's game has arrived (RabbitMQ). The lobby goes back to Waiting
+    // with no players; the game's players move to PendingReturn and come back one by one with "Spil igen".
+    // Idempotent: a repeated or old message (the lobby is not InGame with this game) changes nothing.
+    public async Task<bool> ReopenAfterGameAsync(Guid lobbyId, Guid gameId)
+    {
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await repository.GetAsync(lobbyId);
+            if (lobby is null || lobby.Status != LobbyStatus.InGame || lobby.GameId != gameId)
+            {
+                logger.LogInformation(
+                    "GameFinished for game {GameId}: lobby {LobbyId} is gone or not in that game; nothing to reopen.",
+                    gameId, lobbyId);
+                return false;
+            }
+
+            var after = Clone(lobby);
+            after.Status = LobbyStatus.Waiting;
+            after.GameId = null;
+            after.PendingReturn = lobby.Players
+                .Select(p => new LobbyPlayer { UserId = p.UserId, UserName = p.UserName, IsReady = false })
+                .ToList();
+            after.Players = [];
+
+            if (await repository.TryReopenAsync(lobby, after) == LobbyUpdateResult.Updated)
+            {
+                logger.LogInformation("Lobby {LobbyId} reopened after game {GameId}.", lobbyId, gameId);
+                return true;
+            }
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    // SCRUM-172: "Spil igen". A player of the finished game goes back into the reopened lobby, not ready.
+    // Before GameFinished has arrived the lobby is still InGame: 409, and the frontend tries again shortly.
+    public async Task<LobbyDto> PlayAgainAsync(Guid lobbyId, int userId, string userName)
+    {
+        for (var attempt = 0; attempt < MaxUpdateAttempts; attempt++)
+        {
+            var lobby = await repository.GetAsync(lobbyId) ?? throw new LobbyNotFoundException(lobbyId);
+            var isPlayer = lobby.Players.Any(p => p.UserId == userId);
+
+            if (lobby.Status == LobbyStatus.InGame)
+                throw isPlayer
+                    ? new LobbyConflictException("The game has not finished yet.")
+                    : new LobbyNotFoundException(lobbyId);
+            if (isPlayer)
+                return LobbyDto.FromEntity(lobby); // already back
+            if (lobby.PendingReturn?.Any(p => p.UserId == userId) != true)
+                throw new LobbyNotFoundException(lobbyId);
+            if (lobby.Players.Count >= lobby.Settings.MaxPlayers)
+                throw new LobbyConflictException("The lobby is full.");
+
+            var after = Clone(lobby);
+            after.PendingReturn!.RemoveAll(p => p.UserId == userId);
+            if (after.PendingReturn.Count == 0)
+                after.PendingReturn = null;
+            AddPlayer(after, userId, userName);
+
+            switch (await repository.TryJoinAsync(lobby, after, userId))
+            {
+                case LobbyUpdateResult.Updated:
+                    var dto = LobbyDto.FromEntity(after);
+                    await NotifyAsync(lobbyId, client => client.LobbyUpdated(dto));
+                    return dto;
+                case LobbyUpdateResult.UserInOtherLobby:
+                    throw new LobbyConflictException("You are already in another lobby.");
+                case LobbyUpdateResult.Stale:
+                    continue;
+            }
+        }
+
+        throw new LobbyConflictException("The lobby is busy. Please try again.");
+    }
+
+    // Adds a player last, not ready. In a reopened lobby the old host may not be back (yet); then the
+    // first player to arrive becomes host, like when the host leaves.
+    private static void AddPlayer(Lobby lobby, int userId, string userName)
+    {
+        lobby.Players.Add(new LobbyPlayer { UserId = userId, UserName = userName, IsReady = false });
+        if (lobby.Players.All(p => p.UserId != lobby.HostUserId))
+            lobby.HostUserId = userId;
+    }
+
     private static void EnsureCanStart(Lobby lobby, int userId)
     {
         if (lobby.HostUserId != userId)
@@ -287,7 +372,7 @@ public class LobbyManager(
                 throw new LobbyConflictException("You are already in another lobby.");
 
             var after = Clone(lobby);
-            after.Players.Add(new LobbyPlayer { UserId = userId, UserName = userName, IsReady = false });
+            AddPlayer(after, userId, userName);
 
             switch (await repository.TryJoinAsync(lobby, after, userId))
             {
@@ -339,7 +424,10 @@ public class LobbyManager(
             .ToList(),
         Status = lobby.Status,
         GameId = lobby.GameId,
-        CreatedAt = lobby.CreatedAt
+        CreatedAt = lobby.CreatedAt,
+        PendingReturn = lobby.PendingReturn?
+            .Select(p => new LobbyPlayer { UserId = p.UserId, UserName = p.UserName, IsReady = p.IsReady })
+            .ToList()
     };
 
     private static void Validate(CreateLobbyRequest request)
