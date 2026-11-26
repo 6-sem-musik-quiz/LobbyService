@@ -44,7 +44,26 @@ Hub: `/hubs/lobby`, and `/api/hubs/lobby`, which is where the edge forwards the 
 | server → group | `GameStarted({ gameId })` | After the host has started the game. |
 | server → group | `LobbyClosed()` | When the last player left and the lobby was deleted. |
 
-`LobbyManager` sends the messages via `IHubContext` after the change is stored; a failed send is logged and does not fail the request. A dropped connection does not change the lobby. With more than one replica a SignalR backplane (e.g. Redis) is needed so every pod reaches every group.
+`LobbyManager` sends the messages via `IHubContext` after the change is stored; a failed send is logged and does not fail the request. A dropped connection does not change the lobby.
+
+#### More than one pod (SCRUM-128)
+
+LobbyService runs with 2–5 pods (HPA in gitops). Two things make SignalR work across them:
+
+1. **Redis backplane.** `AddSignalR().AddStackExchangeRedis(...)` uses the same Redis as the lobbies (`ConnectionStrings:Redis`) with channel prefix `slopster-lobby`. A pod that sends `LobbyUpdated` to group `lobby:{id}` publishes it on Redis; every pod receives it and delivers it to its own connections in that group. Without it, a player whose WebSocket is on another pod than the one that handled the REST call gets nothing.
+2. **WebSockets only, without negotiate.** The hub accepts only the WebSockets transport. The frontend sets `SkipNegotiation = true`, so a connection is a single request (the WebSocket upgrade) that lands on one pod and stays there. With negotiate, the `POST .../negotiate` and the following WebSocket are two requests that the Kubernetes Service may send to different pods, and the second pod rejects the unknown connection id. The alternative, session affinity, was not chosen: EdgeService (YARP) has a single destination (`http://lobbyservice:8080`, the Service), so affinity in the edge would not pin a pod, and `sessionAffinity: ClientIP` on the Service would see the edge pods' IPs and pin everybody to the same few pods. SkipNegotiation needs no state in the edge or the Service.
+
+Group membership lives in the pod that holds the connection. If that pod goes away, the client reconnects (`WithAutomaticReconnect`) to any pod and calls `JoinLobbyGroup` again, as it already does after every reconnect.
+
+**Tests.** `BackplaneTests` runs two "pods" (two `WebApplicationFactory` instances sharing the lobby store) with the host on pod A and the guest on pod B. `WithoutBackplane_PlayerOnOtherPodMissesTheEvent` always runs and shows the problem. `WithRedisBackplane_PlayersOnDifferentPodsSeeEachOthersEvents` needs a real Redis and is skipped unless `LOBBY_TEST_REDIS` is set:
+
+```bash
+docker run -d --rm -p 6390:6379 --name lobby-test-redis redis:7-alpine
+LOBBY_TEST_REDIS=localhost:6390 dotnet test -c Release --filter BackplaneTests
+docker stop lobby-test-redis
+```
+
+**Manual test in the cluster.** With 2 pods (`kubectl get pods -n quiz -l app.kubernetes.io/name=lobbyservice`), open the game in two browsers as two users, create a lobby in one and join it in the other, and press "klar" in each: the other browser shows the change at once. Each WebSocket lands on a random pod, so repeat it a few times (reload a browser to get a new connection). Without the backplane, roughly every other attempt shows the change only after a reload; with it, every attempt works.
 
 ### Redis keys
 

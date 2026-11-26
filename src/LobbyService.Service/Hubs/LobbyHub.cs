@@ -12,6 +12,9 @@ public class LobbyHub(ILobbyCacheRepository repository) : Hub<ILobbyClient>
     public const string Path = "/hubs/lobby";
     public const string EdgePath = "/api/hubs/lobby";
 
+    // Prefix of the Redis pub/sub channels the SignalR backplane uses (SCRUM-128).
+    public const string BackplaneChannelPrefix = "slopster-lobby";
+
     public static string GroupName(Guid lobbyId) => $"lobby:{lobbyId}";
 
     public async Task JoinLobbyGroup(Guid lobbyId)

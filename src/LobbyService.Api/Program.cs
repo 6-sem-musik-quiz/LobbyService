@@ -8,6 +8,8 @@ using LobbyService.Service.Hubs;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Http.Connections;
+using StackExchange.Redis;
 using LobbyService.Repository.Metrics;
 using Microsoft.IdentityModel.Tokens;
 using OpenTelemetry.Metrics;
@@ -67,8 +69,16 @@ builder.Services.AddAuthorization(options =>
 });
 
 // Enums as strings, same as the REST API ("Waiting", "InGame").
+// Redis backplane (SCRUM-128): every pod publishes its group messages on Redis and receives the
+// others', so LobbyUpdated reaches a player whose WebSocket sits on another pod. Same Redis as the
+// lobbies; the channel prefix keeps the SignalR channels apart from anything else using it.
 builder.Services.AddSignalR()
-    .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+    .AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()))
+    .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379", o =>
+    {
+        o.Configuration.ChannelPrefix = RedisChannel.Literal(LobbyHub.BackplaneChannelPrefix);
+        o.Configuration.AbortOnConnectFail = false; // start (and serve /health) even when Redis is down
+    });
 
 builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("Redis"),
     builder.Configuration.GetValue<int?>("Lobby:IdleTimeoutMinutes")); // env Lobby__IdleTimeoutMinutes, default 10
@@ -100,8 +110,12 @@ app.UseAuthorization();
 app.MapControllers();
 // Requires a JWT through the fallback policy. The edge forwards /api/lobbyservice/hubs/lobby as
 // /api/hubs/lobby (it turns /api/lobbyservice/{rest} into /api/{rest}), so the hub is mapped there too.
-app.MapHub<LobbyHub>(LobbyHub.Path);
-app.MapHub<LobbyHub>(LobbyHub.EdgePath);
+// WebSockets only (SCRUM-128). With more than one pod, a negotiate request and the connection that
+// follows can land on different pods, and only the pod that answered negotiate knows the connection
+// id. The frontend therefore skips negotiate and opens the WebSocket directly, which is one request
+// to one pod. Long polling and SSE (several requests per connection) are turned off.
+app.MapHub<LobbyHub>(LobbyHub.Path, o => o.Transports = HttpTransportType.WebSockets);
+app.MapHub<LobbyHub>(LobbyHub.EdgePath, o => o.Transports = HttpTransportType.WebSockets);
 app.MapHealthChecks("/health", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }).AllowAnonymous();
 
