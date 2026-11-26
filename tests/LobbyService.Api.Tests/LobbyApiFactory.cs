@@ -10,6 +10,7 @@ using LobbyService.Repository.Metrics;
 using LobbyService.Service.Interfaces;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -19,8 +20,15 @@ using Microsoft.IdentityModel.Tokens;
 namespace LobbyService.Api.Tests;
 
 // Runs the API with an in-memory lobby store, a fake MusicService and a test signing key.
+// By default SignalR uses the in-memory (single-pod) lifetime manager, so the tests need no Redis.
+// The two-pod backplane tests (SCRUM-128) pass a shared store, so two factories act as two pods of
+// one deployment, and optionally a Redis connection string to turn the real Redis backplane on.
 public class LobbyApiFactory : WebApplicationFactory<Program>
 {
+    // Overridden by the two-pod tests (BackplaneTests.Pod). xUnit fixtures need a single public constructor.
+    protected virtual ILobbyCacheRepository? SharedRepository => null;
+    protected virtual string? BackplaneRedis => null;
+
     // Test-only key, not a secret.
     public const string SigningKey = "test-signing-key-for-lobbyservice-api-tests-0123456789";
     public const int KnownPlaylistId = 1;
@@ -29,10 +37,21 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Jwt:SigningKey", SigningKey);
+        var redis = BackplaneRedis;
+        var sharedRepository = SharedRepository;
+        if (redis is not null)
+            builder.UseSetting("ConnectionStrings:Redis", redis);
         builder.ConfigureTestServices(services =>
         {
+            // Last registration wins: replaces the Redis backplane from Program.cs with the
+            // in-memory one, which only reaches connections on this "pod".
+            if (redis is null)
+                services.AddSingleton(typeof(HubLifetimeManager<>), typeof(DefaultHubLifetimeManager<>));
             services.RemoveAll<ILobbyCacheRepository>();
-            services.AddSingleton<ILobbyCacheRepository, InMemoryLobbyCacheRepository>();
+            if (sharedRepository is null)
+                services.AddSingleton<ILobbyCacheRepository, InMemoryLobbyCacheRepository>();
+            else
+                services.AddSingleton(sharedRepository);
             services.RemoveAll<IMusicServiceClient>();
             services.AddSingleton<IMusicServiceClient, FakeMusicServiceClient>();
             services.RemoveAll<IGameServiceClient>();
