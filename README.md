@@ -125,8 +125,10 @@ docker stop lobby-test-rabbit
 
 Traces and logs go over OTLP with the metrics (`UseOtlpExporter`; endpoint and name from the gitops chart):
 HTTP requests (not `/health`), every lobby hub call (`Microsoft.AspNetCore.SignalR.Server`), outgoing HTTP to
-GameService and MusicService, and receiving `GameFinished` (`RabbitMQ.Client.Subscriber`). Starting a game calls
-GameService over HTTP, so a game's trace starts here, and `GameFinished` comes back in the same trace. Logs carry
+GameService and MusicService, and receiving `GameFinished` (`Slopster.Lobby.Messaging`). Starting a game calls
+GameService over HTTP, so a game's trace starts here, and `GameFinished` comes back in the same trace:
+`MessageTracing` starts the consumer span as a child of the `traceparent` in the message headers (RabbitMQ.Client's
+own `deliver` span would start a new trace with only a link). Logs carry
 the trace id.
 
 ## Metrics
