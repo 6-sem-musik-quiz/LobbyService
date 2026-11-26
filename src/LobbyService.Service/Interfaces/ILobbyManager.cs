@@ -45,4 +45,16 @@ public interface ILobbyManager
     // GameServiceUnavailableException (502, the lobby stays Waiting).
     Task<StartGameResponse> StartAsync(Guid lobbyId, int userId, string accessToken,
         CancellationToken cancellationToken = default);
+
+    // SCRUM-172, called for GameService's GameFinished message: an InGame lobby whose GameId is gameId goes
+    // back to Waiting with no players; the game's players wait in PendingReturn. Returns false (and changes
+    // nothing) when the lobby is gone or not in that game, so a repeated message is harmless.
+    Task<bool> ReopenAfterGameAsync(Guid lobbyId, Guid gameId);
+
+    // SCRUM-172, "Spil igen": moves the user from PendingReturn back into the lobby, not ready. The first
+    // player back becomes host if the old host is not there. Returns the lobby unchanged if the user is
+    // already back. Throws LobbyConflictException (409: the game has not finished yet, the lobby is full or
+    // the user is in another lobby) or LobbyNotFoundException (404: unknown lobby, or the user did not play
+    // the game).
+    Task<LobbyDto> PlayAgainAsync(Guid lobbyId, int userId, string userName);
 }

@@ -85,6 +85,8 @@ builder.Services.AddRepositoryLayer(builder.Configuration.GetConnectionString("R
 builder.Services.AddServiceLayer(
     builder.Configuration["MusicService:BaseUrl"],
     builder.Configuration["Services:GameService"]); // env Services__GameService
+// SCRUM-172: GameFinished from RabbitMQ reopens the lobby ("Spil igen"). Env RabbitMQ__Host etc.
+builder.Services.AddGameFinishedConsumer(builder.Configuration);
 
 // Metrics over OTLP. The collector address comes from OTEL_EXPORTER_OTLP_ENDPOINT (default
 // http://localhost:4317) and the service name from OTEL_SERVICE_NAME.

@@ -8,4 +8,7 @@
     <ProjectReference Include="..\LobbyService.Domain\LobbyService.Domain.csproj" />
     <ProjectReference Include="..\LobbyService.Repository\LobbyService.Repository.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
+  </ItemGroup>
 </Project>

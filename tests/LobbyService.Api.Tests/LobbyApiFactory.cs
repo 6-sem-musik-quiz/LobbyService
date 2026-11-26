@@ -28,6 +28,7 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     // Overridden by the two-pod tests (BackplaneTests.Pod). xUnit fixtures need a single public constructor.
     protected virtual ILobbyCacheRepository? SharedRepository => null;
     protected virtual string? BackplaneRedis => null;
+    protected virtual void ConfigureRabbitMq(IWebHostBuilder builder) => builder.UseSetting("RabbitMQ:Enabled", "false");
 
     // Test-only key, not a secret.
     public const string SigningKey = "test-signing-key-for-lobbyservice-api-tests-0123456789";
@@ -37,6 +38,9 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Jwt:SigningKey", SigningKey);
+        // No RabbitMQ in the tests; GameFinished is handed to GameFinishedHandler directly (PlayAgainTests).
+        // RabbitMqPlayAgainTests overrides ConfigureRabbitMq to use a real broker.
+        ConfigureRabbitMq(builder);
         var redis = BackplaneRedis;
         var sharedRepository = SharedRepository;
         if (redis is not null)
@@ -160,6 +164,8 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
                     return Task.FromResult(LobbyUpdateResult.UserInOtherLobby);
                 _userLobbies[userId] = after.Id;
                 _lobbies[after.Id] = Serialize(after);
+                if (!after.IsPrivate && after.Status == LobbyStatus.Waiting)
+                    _publicLobbies.TryAdd(after.Id, 0);
                 return Task.FromResult(LobbyUpdateResult.Updated);
             }
         }
@@ -205,10 +211,20 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
                     return Task.FromResult(LobbyUpdateResult.Stale);
                 _lobbies[after.Id] = Serialize(after);
                 _publicLobbies.TryRemove(after.Id, out _);
-                if (before.Code is not null)
-                    _codes.TryRemove(before.Code, out _);
                 foreach (var player in before.Players)
                     _userLobbies.TryRemove(player.UserId, out _);
+                return Task.FromResult(LobbyUpdateResult.Updated);
+            }
+        }
+
+        // SCRUM-172: like Redis, no user-lobby keys (nobody is back yet) and not listed until someone is.
+        public Task<LobbyUpdateResult> TryReopenAsync(Lobby before, Lobby after)
+        {
+            lock (_lock)
+            {
+                if (!IsUnchanged(before))
+                    return Task.FromResult(LobbyUpdateResult.Stale);
+                _lobbies[after.Id] = Serialize(after);
                 return Task.FromResult(LobbyUpdateResult.Updated);
             }
         }
@@ -221,7 +237,7 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
             IReadOnlyList<Lobby> result = _publicLobbies.Keys
                 .Select(id => _lobbies.TryGetValue(id, out var json) ? Deserialize(json) : null)
                 .OfType<Lobby>()
-                .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting)
+                .Where(l => !l.IsPrivate && l.Status == LobbyStatus.Waiting && l.Players.Count > 0)
                 .ToList();
             return Task.FromResult(result);
         }
