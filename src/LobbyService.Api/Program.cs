@@ -1,3 +1,4 @@
+using LobbyService.Service.Messaging;
 using System.Text;
 using System.Text.Json.Serialization;
 using LobbyService.Api.HealthChecks;
@@ -100,7 +101,7 @@ builder.Services.AddOpenTelemetry()
         .AddAspNetCoreInstrumentation(o => o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"))
         .AddSource("Microsoft.AspNetCore.SignalR.Server") // one span per lobby hub call
         .AddSource("System.Net.Http")                     // GameService (start a game) and MusicService
-        .AddSource("RabbitMQ.Client.Subscriber"))         // GameFinished, in the game's trace
+        .AddSource(MessageTracing.SourceName)) // GameFinished, as a child of the game's publish (not RabbitMQ.Client's linked "deliver" trace)
     .WithMetrics(metrics => metrics
         .AddAspNetCoreInstrumentation() // http.server.request.duration
         .AddMeter("System.Net.Http", "System.Runtime", "Microsoft.AspNetCore.SignalR.Server")
