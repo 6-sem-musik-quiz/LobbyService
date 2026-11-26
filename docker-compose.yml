@@ -1,10 +1,21 @@
-# The JWT signing key comes from a local .env (gitignored); compose stops with an
-# error if it is missing. Copy .env.example to .env and see README, "Running locally".
+# Runs LobbyService in Docker on http://localhost:5004.
+#
+# One-time setup: copy .env.example to .env (.env is in .gitignore, never commit it)
+# and fill in the JWT signing key from OpenBao. See README, "Running locally".
+#
+#   docker compose up --build
+#
+# Not included here: Redis and the other services. The app uses its defaults from
+# appsettings.json (Redis on localhost:6379, MusicService on localhost:5002,
+# GameService on localhost:5005), and "localhost" inside the container is the
+# container itself, so lobbies only work once those are reachable.
 services:
   api:
-    build: .
+    build: .                     # build the Dockerfile in this repo
     ports:
-      - "5004:8080"
+      - "5004:8080"              # your machine's port 5004 -> the app's port 8080 in the container
     environment:
       ASPNETCORE_ENVIRONMENT: Development
+      # The key UserService signs login tokens with, so its tokens are accepted here.
+      # The ":?" makes compose stop with this message when the key is empty.
       Jwt__SigningKey: "${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is not set. Copy .env.example to .env and fill it in from OpenBao (see README)}"
