@@ -121,6 +121,14 @@ docker stop lobby-test-rabbit
 | `RabbitMQ:Username`, `RabbitMQ:Password` | `guest` | From OpenBao `kv/quiz/rabbitmq` via ExternalSecret in the cluster |
 | `RabbitMQ:QueueName` | `lobbyservice.game-finished` | LobbyService's own durable queue, bound to `game-events` / `game.finished.v1` |
 
+## Traces and logs (SCRUM-173)
+
+Traces and logs go over OTLP with the metrics (`UseOtlpExporter`; endpoint and name from the gitops chart):
+HTTP requests (not `/health`), every lobby hub call (`Microsoft.AspNetCore.SignalR.Server`), outgoing HTTP to
+GameService and MusicService, and receiving `GameFinished` (`RabbitMQ.Client.Subscriber`). Starting a game calls
+GameService over HTTP, so a game's trace starts here, and `GameFinished` comes back in the same trace. Logs carry
+the trace id.
+
 ## Metrics
 
 Metrics are exported with OpenTelemetry over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`) and reach Prometheus through the collector. The meter is `Slopster.Lobby`.
