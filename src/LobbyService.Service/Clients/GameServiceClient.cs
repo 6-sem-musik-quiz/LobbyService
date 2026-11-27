@@ -22,6 +22,9 @@ public class GameServiceClient(HttpClient httpClient) : IGameServiceClient
         try
         {
             using var response = await httpClient.SendAsync(message, cancellationToken);
+            if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable
+                && await MaintenanceMessageAsync(response, cancellationToken) is { } maintenance)
+                throw new ServiceInMaintenanceException("gameservice", maintenance);
             if (!response.IsSuccessStatusCode)
                 throw new GameServiceUnavailableException(
                     $"GameService returned {(int)response.StatusCode} when creating the game.");
@@ -42,6 +45,25 @@ public class GameServiceClient(HttpClient httpClient) : IGameServiceClient
         catch (TaskCanceledException e) when (!cancellationToken.IsCancellationRequested)
         {
             throw new GameServiceUnavailableException("GameService timed out.", e);
+        }
+    }
+
+    // SCRUM-179: GameService answers 503 with the maintenance ProblemDetails when an admin has
+    // switched it off. Returns its detail, or null for any other 503 (then it stays a 502).
+    private static async Task<string?> MaintenanceMessageAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var problem = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
+            return problem.ValueKind == JsonValueKind.Object
+                   && problem.TryGetProperty("type", out var type)
+                   && type.GetString() == ServiceInMaintenanceException.ProblemType
+                ? (problem.TryGetProperty("detail", out var detail) ? detail.GetString() : null) ?? "Game is under maintenance."
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 }

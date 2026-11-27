@@ -56,6 +56,29 @@ public class GameServiceClientTests
             ClientWith(handler).CreateGameAsync(Request(), "host-token"));
     }
 
+    // SCRUM-179: GameService switched off by an admin -> its maintenance answer is passed on.
+    [Fact]
+    public async Task CreateGameAsync_MaintenanceProblem_ThrowsServiceInMaintenance_WithTheMessage()
+    {
+        var handler = new StubHandler(HttpStatusCode.ServiceUnavailable,
+            """{ "type": "https://quiz.munkcloud.dk/problems/maintenance", "title": "Game is under maintenance", "status": 503, "detail": "Back at 20:00", "service": "gameservice" }""");
+
+        var e = await Assert.ThrowsAsync<ServiceInMaintenanceException>(() =>
+            ClientWith(handler).CreateGameAsync(Request(), "host-token"));
+
+        Assert.Equal("gameservice", e.Service);
+        Assert.Equal("Back at 20:00", e.Message);
+    }
+
+    [Fact]
+    public async Task CreateGameAsync_OtherProblem503_IsStillUnavailable()
+    {
+        var handler = new StubHandler(HttpStatusCode.ServiceUnavailable, """{ "type": "about:blank", "status": 503 }""");
+
+        await Assert.ThrowsAsync<GameServiceUnavailableException>(() =>
+            ClientWith(handler).CreateGameAsync(Request(), "host-token"));
+    }
+
     [Theory]
     [InlineData("{}")]
     [InlineData("not json")]

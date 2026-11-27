@@ -65,6 +65,8 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
 
     // The fake GameService fails whenever this user is one of the players.
     public const int GameServiceFailsForUserId = 1999;
+    // SCRUM-179: a lobby with this player gets the maintenance answer from (fake) GameService.
+    public const int GameServiceInMaintenanceForUserId = 4242;
 
     public static string CreateToken(int userId, string userName, string signingKey = SigningKey)
     {
@@ -89,9 +91,11 @@ public class LobbyApiFactory : WebApplicationFactory<Program>
     private class FakeGameServiceClient : IGameServiceClient
     {
         public Task<Guid> CreateGameAsync(CreateGameRequest request, string accessToken, CancellationToken cancellationToken = default) =>
-            request.Players.Any(p => p.UserId == GameServiceFailsForUserId) || string.IsNullOrEmpty(accessToken)
-                ? throw new GameServiceUnavailableException("GameService returned 503 when creating the game.")
-                : Task.FromResult(Guid.NewGuid());
+            request.Players.Any(p => p.UserId == GameServiceInMaintenanceForUserId)
+                ? throw new ServiceInMaintenanceException("gameservice", "Back at 20:00")
+                : request.Players.Any(p => p.UserId == GameServiceFailsForUserId) || string.IsNullOrEmpty(accessToken)
+                    ? throw new GameServiceUnavailableException("GameService returned 503 when creating the game.")
+                    : Task.FromResult(Guid.NewGuid());
     }
 
     // Mirrors the Redis repository: lobbies are stored as JSON and updates are compare-and-swap under a lock.

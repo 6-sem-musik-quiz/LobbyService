@@ -493,6 +493,26 @@ public class LobbyControllerTests(LobbyApiFactory factory) : IClassFixture<Lobby
             (await host.PostAsJsonAsync($"/api/lobbies/{id}/ready", new { ready = false })).StatusCode);
     }
 
+    // SCRUM-179: GameService switched off by an admin -> 503 with the maintenance problem, lobby stays Waiting.
+    [Fact]
+    public async Task Start_GameServiceInMaintenance_Returns503MaintenanceProblem_AndLobbyStaysWaiting()
+    {
+        var host = ClientFor(1581);
+        var guest = ClientFor(LobbyApiFactory.GameServiceInMaintenanceForUserId);
+        var id = await LobbyWith(host, [guest], allReady: true);
+
+        var response = await host.PostAsync($"/api/lobbies/{id}/start", null);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(30), response.Headers.RetryAfter?.Delta);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("https://quiz.munkcloud.dk/problems/maintenance", problem.GetProperty("type").GetString());
+        Assert.Equal("Back at 20:00", problem.GetProperty("detail").GetString());
+        Assert.Equal("gameservice", problem.GetProperty("service").GetString());
+        var lobby = await (await host.GetAsync($"/api/lobbies/{id}")).Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Waiting", lobby.GetProperty("status").GetString());
+    }
+
     [Fact]
     public async Task Start_GameServiceFails_Returns502AndLobbyStaysWaiting()
     {
