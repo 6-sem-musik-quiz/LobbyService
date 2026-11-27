@@ -26,6 +26,15 @@ public class LobbyForbiddenException(string message) : Exception(message);
 public class GameServiceUnavailableException(string message, Exception? innerException = null)
     : Exception(message, innerException);
 
+// SCRUM-179: a service the lobby depends on has been switched off by an admin ("design to be
+// disabled"), e.g. GameService when the host starts a game. Mapped to 503 with the same ProblemDetails
+// the edge gives (SCRUM-194), so the frontend shows its maintenance toast.
+public class ServiceInMaintenanceException(string service, string message) : Exception(message)
+{
+    public const string ProblemType = "https://quiz.munkcloud.dk/problems/maintenance";
+    public string Service { get; } = service;
+}
+
 // No lobby has the given join code. Mapped to 404.
 public class LobbyCodeNotFoundException(string code) : Exception($"No lobby has the code '{code}'.")
 {
